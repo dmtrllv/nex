@@ -1,0 +1,7 @@
+[package]
+name = "signals-example"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+signal = { path = "../../crates/signal" }
