@@ -24,24 +24,15 @@ impl<T> Memo<T> {
         todo!()
     }
 
-    /// Replaces the current value.
-    ///
-    /// The supplied value is converted into `T`. Dependents are invalidated
-    /// according to the signal's change-detection policy; queued reactive
-    /// work is processed by the runtime's scheduler.
-    pub fn set(&self, _value: impl Into<T>) {
-        todo!()
-    }
+	// should memo's be updatable like signals?
+    //pub fn set(&self, _value: impl Into<T>) {
+    //    todo!()
+    //}
 
-    /// Updates the current value using a closure and returns a reference to
-    /// the resulting value.
-    ///
-    /// Unlike [`set`](Self::set), this operation can derive the new value from
-    /// the current one. Dependents are invalidated according to the signal's
-    /// change-detection policy.
-    pub fn update(&self, _closure: impl Fn(T) -> T) -> &T {
-        todo!()
-    }
+	// should memo's be updatable like signals?
+    //pub fn update(&self, _closure: impl Fn(T) -> T) -> &T {
+    //    todo!()
+    //}
 
     /// Subscribes to changes in this signal.
     ///
