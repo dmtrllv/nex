@@ -4,6 +4,8 @@ use std::{
     rc::{Rc, Weak},
 };
 
+use crate::ScopeEvent;
+
 pub(crate) struct SourceNode {
     dependants: RefCell<Vec<Weak<ObserverNode>>>,
 }
@@ -75,15 +77,15 @@ impl Drop for ObserverGuard {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum QueuedScopeEvent {
-    Invalidated,
-    Pending,
-}
+//#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+//pub(crate) enum QueuedScopeEvent {
+//    Invalidated,
+//    Pending,
+//}
 
 #[derive(Default)]
 pub(crate) struct ScopeEventState {
-    queue: RefCell<VecDeque<QueuedScopeEvent>>,
+    queue: RefCell<VecDeque<ScopeEvent>>,
     invalidated_queued: Cell<bool>,
     pending_queued: Cell<bool>,
 }
@@ -93,22 +95,22 @@ impl ScopeEventState {
         if !self.invalidated_queued.replace(true) {
             self.queue
                 .borrow_mut()
-                .push_back(QueuedScopeEvent::Invalidated);
+                .push_back(ScopeEvent::Invalidated);
         }
     }
 
     pub(crate) fn queue_pending(&self) {
         if !self.pending_queued.replace(true) {
-            self.queue.borrow_mut().push_back(QueuedScopeEvent::Pending);
+            self.queue.borrow_mut().push_back(ScopeEvent::Pending);
         }
     }
 
-    pub(crate) fn pop(&self) -> Option<QueuedScopeEvent> {
+    pub(crate) fn pop(&self) -> Option<ScopeEvent> {
         let event = self.queue.borrow_mut().pop_front()?;
 
         match event {
-            QueuedScopeEvent::Invalidated => self.invalidated_queued.set(false),
-            QueuedScopeEvent::Pending => self.pending_queued.set(false),
+            ScopeEvent::Invalidated => self.invalidated_queued.set(false),
+            ScopeEvent::Pending => self.pending_queued.set(false),
         }
 
         Some(event)
@@ -306,7 +308,7 @@ mod tests {
         invalidate(&source);
         invalidate(&source);
 
-        assert_eq!(events.pop(), Some(QueuedScopeEvent::Invalidated));
+        assert_eq!(events.pop(), Some(ScopeEvent::Invalidated));
         assert_eq!(events.pop(), None);
     }
 
@@ -318,8 +320,8 @@ mod tests {
         events.queue_invalidated();
         events.queue_pending();
 
-        assert_eq!(events.pop(), Some(QueuedScopeEvent::Pending));
-        assert_eq!(events.pop(), Some(QueuedScopeEvent::Invalidated));
+        assert_eq!(events.pop(), Some(ScopeEvent::Pending));
+        assert_eq!(events.pop(), Some(ScopeEvent::Invalidated));
         assert_eq!(events.pop(), None);
     }
 }

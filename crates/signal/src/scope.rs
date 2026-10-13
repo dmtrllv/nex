@@ -1,7 +1,6 @@
 use std::{
     any::{Any, TypeId},
-    cell::RefCell,
-    collections::VecDeque,
+    cell::{Cell, RefCell},
     rc::Rc,
 };
 
@@ -17,7 +16,12 @@ enum Slot {
     },
 }
 
-struct Work {}
+//struct Work {}
+
+struct ScopeSubscriber<T> {
+    active: Rc<Cell<bool>>,
+    callback: Rc<dyn Fn(&mut Scope<T>, ScopeEvent)>,
+}
 
 #[derive(Default)]
 struct ResourceStore {
@@ -30,9 +34,10 @@ pub struct Scope<T> {
     closure: Box<dyn Fn() -> T>,
     resources: Rc<RefCell<ResourceStore>>,
     result: Option<T>,
-    work_queue: VecDeque<Work>,
+    //work_queue: VecDeque<Work>,
     observer: Rc<ObserverNode>,
     events: Rc<ScopeEventState>,
+    subscribers: Vec<ScopeSubscriber<T>>,
 }
 
 thread_local! {
@@ -146,15 +151,54 @@ impl<T> Scope<T> {
             .expect("scope result should exist after run")
     }
 
-    pub fn subscribe(&self, _closure: impl Fn(&mut Self, ScopeEvent)) -> Subscription {
-        todo!()
+    pub fn subscribe(
+        &mut self,
+        callback: impl Fn(&mut Self, ScopeEvent) + 'static,
+    ) -> Subscription {
+        let (subscription, active) = Subscription::create();
+
+        self.subscribers.push(ScopeSubscriber {
+            active,
+            callback: Rc::new(callback),
+        });
+
+        subscription
     }
 
     pub fn result(&self) -> Option<&T> {
         self.result.as_ref()
     }
+
+    fn dispatch_events(&mut self) {
+        // Take a snapshot so events produced by callbacks are deferred
+        // until the next dispatch pass.
+        let events: Vec<_> = std::iter::from_fn(|| self.events.pop()).collect();
+
+        for event in events {
+            let subscribers: Vec<_> = self
+                .subscribers
+                .iter()
+                .map(|subscriber| {
+                    (
+                        Rc::clone(&subscriber.active),
+                        Rc::clone(&subscriber.callback),
+                    )
+                })
+                .collect();
+
+            for (active, callback) in subscribers {
+                if active.get() {
+                    callback(self, event);
+                }
+            }
+        }
+
+        self.subscribers
+            .retain(|subscriber| subscriber.active.get());
+    }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeEvent {
     Invalidated,
     Pending,
@@ -168,9 +212,10 @@ pub fn scope<T>(closure: impl Fn() -> T + 'static) -> Scope<T> {
         closure: Box::new(closure),
         resources: Rc::new(RefCell::new(ResourceStore::default())),
         result: None,
-        work_queue: VecDeque::new(),
+        //work_queue: VecDeque::new(),
         observer,
         events,
+        subscribers: Vec::new(),
     }
 }
 
@@ -203,7 +248,7 @@ mod tests {
         assert!(scope.observer.is_invalidated());
         assert_eq!(
             scope.events.pop(),
-            Some(runtime::QueuedScopeEvent::Invalidated)
+            Some(ScopeEvent::Invalidated)
         );
         assert_eq!(scope.events.pop(), None);
 
@@ -265,11 +310,66 @@ mod tests {
         assert!(scope.observer.is_invalidated());
         assert_eq!(
             scope.events.pop(),
-            Some(runtime::QueuedScopeEvent::Invalidated)
+            Some(ScopeEvent::Invalidated)
         );
         assert_eq!(scope.events.pop(), None);
 
         assert_eq!(scope.run().value(), 1);
         assert!(!scope.observer.is_invalidated());
+    }
+
+    #[test]
+    fn scope_subscription_receives_invalidation_event() {
+        let count_handle = Rc::new(RefCell::new(None));
+        let handle = Rc::clone(&count_handle);
+        let received = Rc::new(RefCell::new(Vec::new()));
+        let received_by_callback = Rc::clone(&received);
+
+        let mut scope = scope(move || {
+            let count = crate::signal::signal(0);
+            let _ = count.value();
+            *handle.borrow_mut() = Some(count);
+        });
+
+        scope.run();
+
+        let _subscription = scope.subscribe(move |_, event| {
+            received_by_callback.borrow_mut().push(event);
+        });
+
+        count_handle.borrow().as_ref().unwrap().set(1);
+
+        assert!(received.borrow().is_empty());
+
+        scope.dispatch_events();
+
+        assert_eq!(*received.borrow(), vec![ScopeEvent::Invalidated]);
+    }
+
+    #[test]
+    fn unsubscribed_scope_subscription_receives_no_events() {
+        let count_handle = Rc::new(RefCell::new(None));
+        let handle = Rc::clone(&count_handle);
+        let calls = Rc::new(Cell::new(0));
+        let calls_by_callback = Rc::clone(&calls);
+
+        let mut scope = scope(move || {
+            let count = crate::signal::signal(0);
+            let _ = count.value();
+            *handle.borrow_mut() = Some(count);
+        });
+
+        scope.run();
+
+        let subscription = scope.subscribe(move |_, _| {
+            calls_by_callback.set(calls_by_callback.get() + 1);
+        });
+
+        subscription.unsubscribe();
+        count_handle.borrow().as_ref().unwrap().set(1);
+
+        scope.dispatch_events();
+
+        assert_eq!(calls.get(), 0);
     }
 }
