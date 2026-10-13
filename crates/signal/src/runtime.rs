@@ -88,14 +88,13 @@ pub(crate) struct ScopeEventState {
     queue: RefCell<VecDeque<ScopeEvent>>,
     invalidated_queued: Cell<bool>,
     pending_queued: Cell<bool>,
+    work_queue: RefCell<VecDeque<Work>>,
 }
 
 impl ScopeEventState {
     pub(crate) fn queue_invalidated(&self) {
         if !self.invalidated_queued.replace(true) {
-            self.queue
-                .borrow_mut()
-                .push_back(ScopeEvent::Invalidated);
+            self.queue.borrow_mut().push_back(ScopeEvent::Invalidated);
         }
     }
 
@@ -115,7 +114,18 @@ impl ScopeEventState {
 
         Some(event)
     }
+
+    pub(crate) fn queue_work(&self, work: impl FnOnce() + 'static) {
+        self.work_queue.borrow_mut().push_back(Box::new(work));
+        self.queue_pending();
+    }
+
+    pub(crate) fn pop_work(&self) -> Option<Work> {
+        self.work_queue.borrow_mut().pop_front()
+    }
 }
+
+type Work = Box<dyn FnOnce()>;
 
 /// Registers the active observer as a dependent of `source`.
 pub(crate) fn track(source: &Rc<SourceNode>) {
@@ -323,5 +333,95 @@ mod tests {
         assert_eq!(events.pop(), Some(ScopeEvent::Pending));
         assert_eq!(events.pop(), Some(ScopeEvent::Invalidated));
         assert_eq!(events.pop(), None);
+    }
+	
+    #[test]
+    fn queued_work_is_not_executed_immediately() {
+        let events = ScopeEventState::default();
+        let calls = Rc::new(Cell::new(0));
+        let calls_by_work = Rc::clone(&calls);
+
+        events.queue_work(move || {
+            calls_by_work.set(calls_by_work.get() + 1);
+        });
+
+        assert_eq!(calls.get(), 0);
+        assert_eq!(events.pop(), Some(ScopeEvent::Pending));
+
+        let work = events.pop_work().expect("work should be queued");
+        assert_eq!(calls.get(), 0);
+
+        work();
+
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn queued_work_is_retrieved_in_fifo_order() {
+        let events = ScopeEventState::default();
+        let order = Rc::new(RefCell::new(Vec::new()));
+
+        for value in [1, 2, 3] {
+            let order_by_work = Rc::clone(&order);
+
+            events.queue_work(move || {
+                order_by_work.borrow_mut().push(value);
+            });
+        }
+
+        while let Some(work) = events.pop_work() {
+            work();
+        }
+
+        assert_eq!(*order.borrow(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn work_queued_during_processing_is_available_later() {
+        let events = Rc::new(ScopeEventState::default());
+        let order = Rc::new(RefCell::new(Vec::new()));
+
+        let events_by_work = Rc::clone(&events);
+        let order_by_work = Rc::clone(&order);
+
+        events.queue_work(move || {
+            order_by_work.borrow_mut().push(1);
+
+            let order_by_next_work = Rc::clone(&order_by_work);
+            events_by_work.queue_work(move || {
+                order_by_next_work.borrow_mut().push(2);
+            });
+        });
+
+        let first = events.pop_work().expect("first work should be queued");
+        first();
+
+        assert_eq!(*order.borrow(), vec![1]);
+
+        let second = events.pop_work().expect("new work should be queued");
+        second();
+
+        assert_eq!(*order.borrow(), vec![1, 2]);
+    }
+
+    #[test]
+    fn scopes_have_independent_work_queues() {
+        let first = ScopeEventState::default();
+        let second = ScopeEventState::default();
+        let calls = Rc::new(Cell::new(0));
+        let calls_by_work = Rc::clone(&calls);
+
+        first.queue_work(move || {
+            calls_by_work.set(calls_by_work.get() + 1);
+        });
+
+        assert!(second.pop_work().is_none());
+        assert_eq!(calls.get(), 0);
+
+        let work = first.pop_work().expect("first scope should own its work");
+        work();
+
+        assert_eq!(calls.get(), 1);
+        assert!(second.pop_work().is_none());
     }
 }

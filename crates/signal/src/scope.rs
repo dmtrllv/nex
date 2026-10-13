@@ -23,10 +23,20 @@ struct ScopeSubscriber<T> {
     callback: Rc<dyn Fn(&mut Scope<T>, ScopeEvent)>,
 }
 
-#[derive(Default)]
 struct ResourceStore {
     resources: Vec<Slot>,
     cursor: usize,
+    events: Rc<ScopeEventState>,
+}
+
+impl ResourceStore {
+    fn new(events: Rc<ScopeEventState>) -> Self {
+        Self {
+            resources: Vec::new(),
+            cursor: 0,
+            events,
+        }
+    }
 }
 
 #[allow(unused)]
@@ -71,7 +81,7 @@ impl Drop for ActiveScopeGuard {
 ///
 /// Resource identity is positional: the resource at the current cursor is
 /// reused when its stored type matches `T`.
-pub(crate) fn signal_resource<T: 'static>(create: impl FnOnce() -> T) -> Rc<T> {
+pub(crate) fn signal_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState>) -> T) -> Rc<T> {
     ACTIVE_SCOPE.with(|active| {
         let resources = active
             .borrow()
@@ -100,7 +110,7 @@ pub(crate) fn signal_resource<T: 'static>(create: impl FnOnce() -> T) -> Rc<T> {
             }
         }
 
-        let value = Rc::new(create());
+        let value = Rc::new(create(Rc::clone(&store.events)));
 
         store.resources.push(Slot::Signal {
             type_id: TypeId::of::<T>(),
@@ -210,7 +220,7 @@ pub fn scope<T>(closure: impl Fn() -> T + 'static) -> Scope<T> {
 
     Scope {
         closure: Box::new(closure),
-        resources: Rc::new(RefCell::new(ResourceStore::default())),
+        resources: Rc::new(RefCell::new(ResourceStore::new(Rc::clone(&events)))),
         result: None,
         //work_queue: VecDeque::new(),
         observer,
@@ -246,10 +256,7 @@ mod tests {
         count_handle.borrow().as_ref().unwrap().set(1);
 
         assert!(scope.observer.is_invalidated());
-        assert_eq!(
-            scope.events.pop(),
-            Some(ScopeEvent::Invalidated)
-        );
+        assert_eq!(scope.events.pop(), Some(ScopeEvent::Invalidated));
         assert_eq!(scope.events.pop(), None);
 
         scope.run();
@@ -308,10 +315,7 @@ mod tests {
         scope.run().set(1);
 
         assert!(scope.observer.is_invalidated());
-        assert_eq!(
-            scope.events.pop(),
-            Some(ScopeEvent::Invalidated)
-        );
+        assert_eq!(scope.events.pop(), Some(ScopeEvent::Invalidated));
         assert_eq!(scope.events.pop(), None);
 
         assert_eq!(scope.run().value(), 1);

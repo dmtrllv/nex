@@ -7,13 +7,14 @@ use std::{
 
 use crate::{
     Subscription,
-    runtime::{self, SourceNode},
+    runtime::{self, ScopeEventState, SourceNode},
     scope::signal_resource,
 };
 
 struct SignalInner<T> {
     value: RefCell<Option<T>>,
     source: Rc<SourceNode>,
+    _events: Rc<ScopeEventState>,
 }
 
 /// A handle to a reactive value.
@@ -95,9 +96,10 @@ impl<T: Debug> Debug for Signal<T> {
 
 /// Creates or retrieves a signal resource in the active scope.
 pub fn signal<T: 'static>(value: T) -> Signal<T> {
-    let inner = signal_resource(|| SignalInner {
+    let inner = signal_resource(|events| SignalInner {
         value: RefCell::new(Some(value)),
         source: SourceNode::new(),
+        _events: events,
     });
 
     Signal { inner }
