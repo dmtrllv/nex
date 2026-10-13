@@ -1,31 +1,9 @@
 use signal::{effect, memo, scope, signal};
 
-enum Dir {
-    Up,
-    Down,
-}
-
 fn main() {
-    let items = signal(vec![1, 2, 3 /* ... */]);
-	let done = signal(2);
-
-    // Mutate in place without cloning the entire Vec.
-    items.update(|mut items| {
-        items.push(4);
-		items
-    });
-
-    // simply return new value
-    done.update(|val| val + 1);
-
-    // Replace the entire value when appropriate.
-    items.set(vec![10, 20, 30]);
-
-
     let mut app = scope(|| {
         let price = signal(25.0);
         let quantity = signal(2);
-        let dir = signal(Dir::Up);
 
         let total = memo(|| price.value() * quantity.value() as f64);
 
