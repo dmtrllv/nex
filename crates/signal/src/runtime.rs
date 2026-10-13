@@ -25,6 +25,8 @@ pub(crate) struct ObserverNode {
 }
 
 impl ObserverNode {
+    // TODO: remove after implementation is complete
+    #[allow(unused)]
     pub(crate) fn new() -> Rc<Self> {
         Rc::new(Self {
             dependencies: RefCell::new(Vec::new()),
@@ -91,6 +93,8 @@ pub(crate) struct ScopeEventState {
     work_queue: RefCell<VecDeque<Work>>,
 }
 
+// TODO: remove after implementation is complete
+#[allow(unused)]
 impl ScopeEventState {
     pub(crate) fn queue_invalidated(&self) {
         if !self.invalidated_queued.replace(true) {
@@ -334,7 +338,7 @@ mod tests {
         assert_eq!(events.pop(), Some(ScopeEvent::Invalidated));
         assert_eq!(events.pop(), None);
     }
-	
+
     #[test]
     fn queued_work_is_not_executed_immediately() {
         let events = ScopeEventState::default();

@@ -7,7 +7,8 @@ use std::{cell::Cell, rc::Rc};
 pub struct Subscription {
     active: Rc<Cell<bool>>,
 }
-
+// TODO: remove after implementation is complete
+#[allow(unused)]
 impl Subscription {
     pub(crate) fn create() -> (Self, Rc<Cell<bool>>) {
         let active = Rc::new(Cell::new(true));

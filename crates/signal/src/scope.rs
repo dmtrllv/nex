@@ -16,11 +16,12 @@ enum Slot {
     },
 }
 
-//struct Work {}
+type ScopeSubscriberFn<T> = dyn Fn(&mut Scope<T>, ScopeEvent);
 
+// TODO: remove after implementation is complete
 struct ScopeSubscriber<T> {
     active: Rc<Cell<bool>>,
-    callback: Rc<dyn Fn(&mut Scope<T>, ScopeEvent)>,
+    callback: Rc<ScopeSubscriberFn<T>>,
 }
 
 struct ResourceStore {
@@ -39,6 +40,7 @@ impl ResourceStore {
     }
 }
 
+// TODO: remove after implementation is complete
 #[allow(unused)]
 pub struct Scope<T> {
     closure: Box<dyn Fn() -> T>,
@@ -121,6 +123,8 @@ pub(crate) fn signal_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState
     })
 }
 
+// TODO: remove after implementation is complete
+#[allow(unused)]
 impl<T> Scope<T> {
     pub fn flush(&mut self) {
         todo!()
