@@ -1,4 +1,4 @@
-use std::{fmt::Debug, marker::PhantomData};
+use std::{cell::{Ref, RefCell}, fmt::Debug, ops::Deref, rc::Rc};
 
 use crate::Subscription;
 
@@ -8,7 +8,7 @@ use crate::Subscription;
 /// dependency. Writes notify dependents according to the runtime's scheduling
 /// and change-detection rules.
 pub struct Signal<T> {
-    _data: PhantomData<T>,
+    value: Rc<RefCell<T>>,
 }
 
 impl<T> Signal<T> {
@@ -16,7 +16,7 @@ impl<T> Signal<T> {
     /// dependency, if one exists.
     ///
     /// The returned reference is tied to the lifetime of this handle's borrow.
-    pub fn get(&self) -> &T {
+    pub fn get(&self) -> Ref<'_, T> {
         todo!()
     }
 
@@ -24,7 +24,7 @@ impl<T> Signal<T> {
     ///
     /// Use this when reading state should not cause the current reactive
     /// context to rerun when the value changes.
-    pub fn inspect(&self) -> &T {
+    pub fn inspect(&self) -> Ref<'_, T> {
         todo!()
     }
 
@@ -43,7 +43,7 @@ impl<T> Signal<T> {
     /// Unlike [`set`](Self::set), this operation can derive the new value from
     /// the current one. Dependents are invalidated according to the signal's
     /// change-detection policy.
-    pub fn update(&self, _closure: impl Fn(T) -> T) -> &T {
+    pub fn update(&self, _closure: impl Fn(T) -> T) -> Ref<'_, T> {
         todo!()
     }
 
@@ -80,7 +80,7 @@ impl<T: Copy> Signal<T> {
 
 impl<T: Debug> Debug for Signal<T> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_tuple("Signal").field(self.inspect()).finish()
+		f.debug_tuple("Signal").field(self.inspect().deref()).finish()
 	}
 }
 

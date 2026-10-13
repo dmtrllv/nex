@@ -1,48 +1,15 @@
-use signal::{ScopeEvent, effect, memo, scope, signal};
+use signal::{scope, signal};
+
+mod example_1;
 
 fn main() {
-    let mut app = scope(|| {
-        let price = signal(25.0);
-        let quantity = signal(2);
+    let mut app = scope(|| signal(0));
 
-        let total = memo(|| price.value() * quantity.value() as f64);
+    let count = app.run();
 
-        effect(|| {
-            println!("Price: €{:.2}", price.value());
-        });
+    assert_eq!(count.inspect_value(), 0);
 
-        effect(|| {
-            println!("Cart total: €{:.2}", total.value());
-        });
+    count.set(10);
 
-        println!("Inspecting price: €{:.2}", price.inspect());
-
-        (price, quantity)
-    });
-
-    let _subscription = app.subscribe(|app, event| match event {
-        ScopeEvent::Invalidated => {
-            let (price, quantity) = app.run();
-
-            println!("--- Read current state ---");
-            println!("Price: €{:.2}", price.get());
-            println!("Quantity: {}", quantity.get());
-        }
-        ScopeEvent::Pending => {
-            app.flush();
-        }
-    });
-
-    let (price, quantity) = app.run();
-    println!(
-        "Initial price: {}, quantity: {}",
-        price.value(),
-        quantity.value()
-    );
-
-    quantity.set(3);
-    price.set(30.0);
-
-    let result = app.run();
-    println!("Latest result: {result:?}");
+    assert_eq!(count.inspect_value(), 10);
 }
