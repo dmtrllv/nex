@@ -1,69 +1,145 @@
-use std::marker::PhantomData;
+use std::{
+    cell::{Ref, RefCell},
+    rc::Rc,
+};
 
-use crate::Subscription;
+use crate::{
+    runtime::{self, ObserverGuard, ObserverNode, ScopeEventState, SourceNode},
+    scope::memo_resource,
+    Subscription,
+};
 
-pub struct Memo<T> {
-    _data: PhantomData<T>,
+// NOTE:
+// One important caveat
+// This is the first implementation layer, not the final memo implementation. 
+// It establishes the evaluation path and connects invalidation to queued work. 
+// The next step must add memo subscriptions and tests, then check edge cases 
+// such as a memo being read after invalidation but before its queued work runs.
+
+struct MemoInner<T> {
+    compute: RefCell<Box<dyn Fn() -> T>>,
+    value: RefCell<Option<T>>,
+    source: Rc<SourceNode>,
+    observer: Rc<ObserverNode>,
+    events: Rc<ScopeEventState>,
 }
 
-impl<T> Memo<T> {
-    /// Lazy exectute, cache the current value and registers the active reactive context as a
-    /// dependency, if one exists.
-    ///
-    /// The returned reference is tied to the lifetime of this handle's borrow.
-    pub fn get(&self) -> &T {
-        todo!()
+/// A lazily evaluated, cached reactive computation.
+pub struct Memo<T: PartialEq + 'static> {
+    inner: Rc<MemoInner<T>>,
+}
+
+impl<T: PartialEq + 'static> Memo<T> {
+    /// Lazily evaluates the memo and tracks the active observer as a
+    /// dependent of its cached value.
+    pub fn get(&self) -> Ref<'_, T> {
+        ensure_value(&self.inner);
+        runtime::track(&self.inner.source);
+
+        Ref::map(self.inner.value.borrow(), |value| {
+            value.as_ref().expect("memo value should be initialized")
+        })
     }
 
-    /// Lazy exectute, cache the current value without registering a reactive dependency.
-    ///
-    /// Use this when reading state should not cause the current reactive
-    /// context to rerun when the value changes.
-    pub fn inspect(&self) -> &T {
-        todo!()
+    /// Lazily evaluates the memo without tracking a dependency.
+    pub fn inspect(&self) -> Ref<'_, T> {
+        ensure_value(&self.inner);
+
+        Ref::map(self.inner.value.borrow(), |value| {
+            value.as_ref().expect("memo value should be initialized")
+        })
     }
 
-    // should memo's be updatable like signals?
-    //pub fn set(&self, _value: impl Into<T>) {
-    //    todo!()
-    //}
-
-    // should memo's be updatable like signals?
-    //pub fn update(&self, _closure: impl Fn(T) -> T) -> &T {
-    //    todo!()
-    //}
-
-    /// Subscribes to changes in this signal.
+    /// Subscribes to changes in this memo.
     ///
-    /// The callback receives a reference to the value when a change
-    /// notification is delivered. Returns a [`Subscription`] that can be
-    /// consumed to unsubscribe.
-    pub fn subscribe(&self, _closure: impl Fn(&T)) -> Subscription {
-        todo!()
+    /// Notifications will be queued when the memo's computed value changes.
+    pub fn subscribe(&self, _closure: impl Fn(&T) + 'static) -> Subscription {
+        todo!("implement memo subscriptions in the next step")
     }
 }
 
-impl<T: Copy> Memo<T> {
-    /// Lazy exectute and returns a copy of the current value and tracks the active reactive
-    /// context as a dependency, if one exists.
-    ///
-    /// This is equivalent to calling [`get`](Self::get) and copying the
-    /// result. Use [`inspect_value`](Self::inspect_value) to read a copy
-    /// without registering a dependency.
+impl<T: Copy + PartialEq + 'static> Memo<T> {
+    /// Returns a copy of the memo's value and tracks the active observer.
     pub fn value(&self) -> T {
         *self.get()
     }
 
-    /// Lazy exectute and returns a copy of the current value without registering a reactive
-    /// dependency.
-    ///
-    /// This is equivalent to calling [`inspect`](Self::inspect) and copying
-    /// the result.
+    /// Returns a copy of the memo's value without tracking a dependency.
     pub fn inspect_value(&self) -> T {
         *self.inspect()
     }
 }
 
-pub fn memo<T>(_closure: impl Fn() -> T) -> Memo<T> {
-    todo!()
+/// Creates or retrieves a memo resource in the active scope.
+pub fn memo<T: PartialEq + 'static>(closure: impl Fn() -> T + 'static) -> Memo<T> {
+    let inner = memo_resource(|events| MemoInner {
+        compute: RefCell::new(Box::new(closure)),
+        value: RefCell::new(None),
+        source: SourceNode::new(),
+        observer: ObserverNode::new(),
+        events,
+    });
+
+    // The scheduled callback holds only a weak reference, so it cannot
+    // keep the memo alive after its owning resources are released.
+    let weak_inner = Rc::downgrade(&inner);
+    inner.observer.set_memo_schedule(Rc::new(move || {
+        let Some(inner) = weak_inner.upgrade() else {
+            return;
+        };
+
+        let weak_inner = Rc::downgrade(&inner);
+        inner.events.queue_work(move || {
+            let Some(inner) = weak_inner.upgrade() else {
+                return;
+            };
+
+            ensure_value(&inner);
+        });
+    }));
+
+    Memo { inner }
+}
+
+/// Ensures the memo has a current cached value.
+///
+/// Returns `true` if a previously cached value changed.
+fn ensure_value<T: PartialEq + 'static>(inner: &Rc<MemoInner<T>>) -> bool {
+    if inner.value.borrow().is_some() && !inner.observer.is_invalidated() {
+        return false;
+    }
+
+    runtime::clear_dependencies(&inner.observer);
+
+    // Mark valid before evaluation. If the computation causes one of its
+    // dependencies to change while running, invalidation can mark it dirty
+    // again and schedule another pass.
+    inner.observer.mark_valid();
+
+    let next = {
+        let _observer_guard = ObserverGuard::enter(Rc::clone(&inner.observer));
+        (inner.compute.borrow())()
+    };
+
+    let changed = {
+        let mut cached = inner.value.borrow_mut();
+
+        match cached.as_ref() {
+            Some(previous) if previous == &next => false,
+            Some(_) => {
+                *cached = Some(next);
+                true
+            }
+            None => {
+                *cached = Some(next);
+                false
+            }
+        }
+    };
+
+    if changed {
+        runtime::invalidate(&inner.source);
+    }
+
+    changed
 }

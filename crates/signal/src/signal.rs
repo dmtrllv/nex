@@ -25,6 +25,7 @@ struct SignalInner<T> {
 }
 
 /// A handle to a reactive value.
+#[derive(Clone)]
 pub struct Signal<T: 'static> {
     inner: Rc<SignalInner<T>>,
 }

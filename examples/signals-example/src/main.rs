@@ -1,15 +1,18 @@
-use signal::{scope, signal};
+//use signal::{scope, signal};
+
+use crate::example_1::example_1;
 
 mod example_1;
 
 fn main() {
-    let mut app = scope(|| signal(0));
+	example_1();
+    //let mut app = scope(|| signal(0));
 
-    let count = app.run();
+    //let count = app.run();
 
-    assert_eq!(count.inspect_value(), 0);
+    //assert_eq!(count.inspect_value(), 0);
 
-    count.set(10);
+    //count.set(10);
 
-    assert_eq!(count.inspect_value(), 10);
+    //assert_eq!(count.inspect_value(), 10);
 }
