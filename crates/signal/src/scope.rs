@@ -100,6 +100,14 @@ impl ResourceStore {
     }
 }
 
+struct FlushGuard(Rc<Cell<bool>>);
+
+impl Drop for FlushGuard {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
 pub struct Scope<T> {
     closure: Box<dyn Fn() -> T>,
     resources: Rc<RefCell<ResourceStore>>,
@@ -107,6 +115,7 @@ pub struct Scope<T> {
     //work_queue: VecDeque<Work>,
     observer: Rc<ObserverNode>,
     events: Rc<ScopeEventState>,
+    flushing: Rc<Cell<bool>>,
     subscribers: Vec<ScopeSubscriber<T>>,
 }
 
@@ -178,7 +187,18 @@ pub(crate) fn memo_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState>)
 }
 
 impl<T> Scope<T> {
+    /// Dispatches queued scope events and processes pending reactive work.
+    ///
+    /// Processing continues until neither events nor work remain.
+    /// Reentrant calls to `flush` return immediately; the outer flush
+    /// remains responsible for draining the queues.
     pub fn flush(&mut self) {
+        if self.flushing.replace(true) {
+            return;
+        }
+
+        let _guard = FlushGuard(Rc::clone(&self.flushing));
+
         loop {
             self.dispatch_events();
 
@@ -194,12 +214,14 @@ impl<T> Scope<T> {
         }
     }
 
-    /// Evaluates the scope if it has no cached result or was invalidated.
+    /// Processes queued reactive work and evaluates the scope if needed.
     ///
+    /// Events and work are processed before the cached result is checked.
     /// Resources are reused by their positions in the scope's execution.
     pub fn run(&mut self) -> &T {
+        self.flush();
+
         if self.result.is_none() || self.observer.is_invalidated() {
-            // reset the resource cursor
             {
                 let mut store = self.resources.borrow_mut();
                 store.cursor = 0;
@@ -290,9 +312,9 @@ pub fn scope<T>(closure: impl Fn() -> T + 'static) -> Scope<T> {
         closure: Box::new(closure),
         resources: Rc::new(RefCell::new(ResourceStore::new(Rc::clone(&events)))),
         result: None,
-        //work_queue: VecDeque::new(),
         observer,
         events,
+        flushing: Rc::new(Cell::new(false)),
         subscribers: Vec::new(),
     }
 }
@@ -484,6 +506,7 @@ mod tests {
             result: None,
             observer: ObserverNode::new_for_scope(&events),
             events: Rc::clone(&events),
+            flushing: Rc::new(Cell::new(false)),
             subscribers: Vec::new(),
         };
 
@@ -519,5 +542,44 @@ mod tests {
         scope.flush();
 
         assert_eq!(*calls.borrow(), vec![ScopeEvent::Invalidated]);
+    }
+
+    #[test]
+    fn run_dispatches_invalidation_and_allows_reentrant_run() {
+        let signal_handle = Rc::new(RefCell::new(None));
+        let handle = Rc::clone(&signal_handle);
+        let invalidations = Rc::new(Cell::new(0));
+        let callback_invalidations = Rc::clone(&invalidations);
+
+        let mut app = scope(move || {
+            let count = crate::signal::signal(0);
+            let _ = count.value();
+            *handle.borrow_mut() = Some(count.clone());
+            count
+        });
+
+        app.run();
+
+        let _subscription = app.subscribe(move |app, event| match event {
+            ScopeEvent::Invalidated => {
+                callback_invalidations.set(callback_invalidations.get() + 1);
+
+                let count = app.run();
+                assert_eq!(count.value(), 1);
+            }
+            ScopeEvent::Pending => {
+                app.flush();
+            }
+        });
+
+        signal_handle.borrow().as_ref().unwrap().set(1);
+
+        // The write queues events; it does not synchronously invoke
+        // the scope subscription.
+        assert_eq!(invalidations.get(), 0);
+
+        // run() is a processing boundary and dispatches the queued event.
+        assert_eq!(app.run().value(), 1);
+        assert_eq!(invalidations.get(), 1);
     }
 }
