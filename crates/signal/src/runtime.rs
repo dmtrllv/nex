@@ -22,6 +22,7 @@ pub(crate) struct ObserverNode {
     dependencies: RefCell<Vec<Weak<SourceNode>>>,
     invalidated: Cell<bool>,
     scope_events: Option<Weak<ScopeEventState>>,
+    memo_schedule: RefCell<Option<Rc<dyn Fn()>>>,
 }
 
 impl ObserverNode {
@@ -32,6 +33,7 @@ impl ObserverNode {
             dependencies: RefCell::new(Vec::new()),
             invalidated: Cell::new(false),
             scope_events: None,
+            memo_schedule: RefCell::new(None),
         })
     }
 
@@ -40,6 +42,7 @@ impl ObserverNode {
             dependencies: RefCell::new(Vec::new()),
             invalidated: Cell::new(false),
             scope_events: Some(Rc::downgrade(events)),
+            memo_schedule: RefCell::new(None),
         })
     }
 
@@ -49,6 +52,18 @@ impl ObserverNode {
 
     pub(crate) fn mark_valid(&self) {
         self.invalidated.set(false);
+    }
+
+    pub(crate) fn set_memo_schedule(&self, schedule: Rc<dyn Fn()>) {
+        *self.memo_schedule.borrow_mut() = Some(schedule);
+    }
+
+    fn schedule_memo(&self) {
+        let schedule = self.memo_schedule.borrow().clone();
+
+        if let Some(schedule) = schedule {
+            schedule();
+        }
     }
 }
 
@@ -78,12 +93,6 @@ impl Drop for ObserverGuard {
         });
     }
 }
-
-//#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-//pub(crate) enum QueuedScopeEvent {
-//    Invalidated,
-//    Pending,
-//}
 
 #[derive(Default)]
 pub(crate) struct ScopeEventState {
@@ -205,10 +214,12 @@ pub(crate) fn invalidate(source: &Rc<SourceNode>) {
 
         let was_invalidated = observer.invalidated.replace(true);
 
-        if !was_invalidated
-            && let Some(events) = observer.scope_events.as_ref().and_then(Weak::upgrade)
-        {
-            events.queue_invalidated();
+        if !was_invalidated {
+            if let Some(events) = observer.scope_events.as_ref().and_then(Weak::upgrade) {
+                events.queue_invalidated();
+            }
+
+            observer.schedule_memo();
         }
 
         true
