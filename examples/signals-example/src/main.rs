@@ -11,8 +11,10 @@ fn main() {
             println!("Price: €{:.2}", price.value());
         });
 
-    	println!("Cart total: €{:.2}", total);
-        
+        effect(|| {
+            println!("Cart total: €{:.2}", total.inspect_value());
+        });
+
         println!("Inspecing Price: €{:.2}", price.inspect());
 
         (price, quantity)

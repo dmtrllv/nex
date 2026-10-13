@@ -1,5 +1,7 @@
 use std::marker::PhantomData;
 
+use crate::Subscription;
+
 /// A handle to a reactive value.
 ///
 /// Reads through [`get`](Self::get) register the active reactive context as a
@@ -73,24 +75,6 @@ impl<T: Copy> Signal<T> {
     /// the result.
     pub fn inspect_value(&self) -> T {
         *self.inspect()
-    }
-}
-
-/// A handle to an active signal subscription.
-///
-/// Dropping this value does not necessarily unsubscribe automatically;
-/// call [`unsubscribe`](Self::unsubscribe) to explicitly remove the
-/// subscription.
-pub struct Subscription;
-
-impl Subscription {
-    /// Removes the subscription so its callback no longer receives change
-    /// notifications.
-    ///
-    /// Consumes the handle to prevent the same subscription from being
-    /// explicitly unsubscribed through it more than once.
-    pub fn unsubscribe(self) {
-        todo!()
     }
 }
 
