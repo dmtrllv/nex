@@ -42,9 +42,7 @@ impl<T> Signal<T> {
         })
     }
 
-    /// Replaces the current value.
-    ///
-    /// Dependency invalidation will be implemented in a later step.
+    /// Replaces the current value and invalidates dependent observers.
     pub fn set(&self, value: impl Into<T>) {
         *self.inner.value.borrow_mut() = Some(value.into());
 
@@ -52,9 +50,6 @@ impl<T> Signal<T> {
     }
 
     /// Replaces the current value with the result of `closure`.
-    ///
-    /// Requires `T: Clone` because the current value is retained in the
-    /// signal while a copy is passed to the closure.
     pub fn update(&self, closure: impl FnOnce(T) -> T) -> Ref<'_, T> {
         let current = self
             .inner

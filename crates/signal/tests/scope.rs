@@ -1,6 +1,5 @@
 use signal::{scope, signal};
 
-
 #[test]
 fn signal_resource_persists_across_scope_runs() {
     let mut app = scope(|| signal(10));
@@ -26,8 +25,7 @@ fn signal_value_persists_when_the_scope_closure_runs_again() {
 
     app.run().set(20);
 
-    // The current implementation does not expose a public invalidation
-    // operation yet, so verify caching rather than forcing a second run.
+    // No tracked dependency changed, so the cached scope result is reused.
     assert_eq!(app.run().value(), 20);
     assert_eq!(executions.get(), 1);
 }

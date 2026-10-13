@@ -138,3 +138,99 @@ pub(crate) fn invalidate(source: &Rc<SourceNode>) {
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tracking_deduplicates_dependencies() {
+        let observer = ObserverNode::new();
+        let source = SourceNode::new();
+
+        {
+            let _guard = ObserverGuard::enter(Rc::clone(&observer));
+            track(&source);
+            track(&source);
+        }
+
+        assert_eq!(observer.dependencies.borrow().len(), 1);
+        assert_eq!(source.dependants.borrow().len(), 1);
+    }
+
+    #[test]
+    fn clearing_dependencies_removes_reverse_edges() {
+        let observer = ObserverNode::new();
+        let first = SourceNode::new();
+        let second = SourceNode::new();
+
+        {
+            let _guard = ObserverGuard::enter(Rc::clone(&observer));
+            track(&first);
+        }
+
+        clear_dependencies(&observer);
+
+        {
+            let _guard = ObserverGuard::enter(Rc::clone(&observer));
+            track(&second);
+        }
+
+        assert!(
+            observer
+                .dependencies
+                .borrow()
+                .iter()
+                .filter_map(Weak::upgrade)
+                .any(|source| Rc::ptr_eq(&source, &second))
+        );
+
+        assert!(first.dependants.borrow().is_empty());
+        assert_eq!(second.dependants.borrow().len(), 1);
+    }
+
+    #[test]
+    fn invalidation_marks_dependent_observer() {
+        let source = SourceNode::new();
+        let observer = ObserverNode::new();
+
+        {
+            let _guard = ObserverGuard::enter(Rc::clone(&observer));
+            track(&source);
+        }
+
+        assert!(!observer.is_invalidated());
+
+        invalidate(&source);
+
+        assert!(observer.is_invalidated());
+    }
+
+    #[test]
+    fn invalidation_does_not_mark_unrelated_observer() {
+        let source = SourceNode::new();
+        let observer = ObserverNode::new();
+
+        invalidate(&source);
+
+        assert!(!observer.is_invalidated());
+    }
+
+    #[test]
+    fn invalidation_removes_dropped_observers() {
+        let source = SourceNode::new();
+        let observer = ObserverNode::new();
+
+        {
+            let _guard = ObserverGuard::enter(Rc::clone(&observer));
+            track(&source);
+        }
+
+        assert_eq!(source.dependants.borrow().len(), 1);
+
+        drop(observer);
+        invalidate(&source);
+
+        assert!(source.dependants.borrow().is_empty());
+    }
+}
