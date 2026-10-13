@@ -12,7 +12,7 @@ fn main() {
         });
 
         effect(|| {
-            println!("Cart total: €{:.2}", total.inspect_value());
+            println!("Cart total: €{:.2}", total.value());
         });
 
         println!("Inspecing Price: €{:.2}", price.inspect());
