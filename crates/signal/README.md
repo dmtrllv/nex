@@ -4,14 +4,14 @@ A generic, single-threaded reactive state-management crate written in Rust.
 
 The crate provides signals, memos, effects, persistent scopes, subscriptions, and a deterministic scheduler. It is independent of any UI framework or renderer and can serve as the reactive foundation for component rendering, state management, and other reactive systems.
 
-The runtime separates state mutation from reactive execution. Signal writes update values and invalidate dependents, while `flush()` processes pending reactive work. Scopes preserve resources across executions using positional hook ordering.
+The runtime separates state mutation from reactive execution. Signal writes update values and invalidate dependents, while `Scope::flush()` processes pending reactive work. Scopes preserve resources across executions using positional hook ordering.
 
 ## Design goals
 
 - Provide a small public API based on free functions.
-- Track reactive dependencies automatically through `observe()`.
-- Support untracked reads through `get()`.
-- Defer subsequent reactive work until `flush()` processes pending work.
+- Track reactive dependencies automatically through `get()`.
+- Support untracked reads through `inspect()`.
+- Defer subsequent reactive work until `Scope::flush()` processes pending work.
 - Recompute memos when their dependencies change.
 - Notify dependents when a memo's output changes.
 - Support memos that return signals by maintaining a stable, memo-owned output signal.
@@ -27,23 +27,24 @@ The runtime separates state mutation from reactive execution. Signal writes upda
 Reactive resources are created through free functions. The active execution context determines resource ownership, resource reuse, and dependency tracking.
 
 ```rust
+use signal::{effect, memo, scope, signal};
+
 let count = signal(10);
 
-let doubled = memo(|| count.observe() * 2);
+let doubled = memo(|| count.get() * 2);
 
 let handle = effect(|| {
-    println!("Current value: {}", count.observe());
+    println!("Current value: {}", count.get());
 });
 
-let s = scope(|| {
+let app = scope(|| {
     let local = signal(42);
     local
 });
 
-let local = s.run();
+// The scope closure executes when run() is called.
+let local = app.run();
 ```
-
-The scope in this example is deferred: its closure does not execute until `s.run()` is called.
 
 The principal API is organized around the following operations:
 
@@ -53,13 +54,13 @@ The principal API is organized around the following operations:
 | `memo(f)` | Creates or retrieves a memo, returns its current computed result, and registers the memo output with the active observer when applicable. |
 | `effect(f)` | Creates or retrieves a reactive side effect. |
 | `scope(f)` | Creates a deferred, persistent scope. |
-| `observe()` | Reads a signal and registers a dependency with the active observer. |
-| `get()` | Reads a signal without registering a dependency. |
+| `get()` | Reads a signal and registers a dependency when a tracking context is active. |
+| `inspect()` | Reads a signal without registering a dependency. |
 | `set(value)` | Replaces a signal's stored value and invalidates dependents. |
 | `update(f)` | Mutates a signal's stored value and invalidates dependents. |
 | `subscribe(f)` | Registers an explicit change-notification callback. |
 | `run()` | Executes a scope and returns the result of its closure. |
-| `flush()` | Processes queued reactive work. |
+| `flush()` | Processes queued reactive work through the scope API. |
 | `batch(f)` | Groups writes into a scheduling interval. |
 
 Resource handles and subscriptions may expose additional lifecycle operations, including disposal. The exact signatures and return types are defined by the crate's public API.
@@ -71,12 +72,12 @@ A signal stores mutable state and acts as a source of reactive dependencies.
 ```rust
 let count = signal(0);
 
-assert_eq!(*count.get(), 0);
+assert_eq!(*count.inspect(), 0);
 
 count.set(1);
 count.update(|value| *value += 1);
 
-assert_eq!(*count.get(), 2);
+assert_eq!(*count.inspect(), 2);
 ```
 
 ### Reads
@@ -85,12 +86,12 @@ Signals support tracked and untracked reads.
 
 | Operation | Reads the value | Registers a dependency |
 |---|---|---|
-| `get()` | Yes | No |
-| `observe()` | Yes | Yes, when a tracking context is active |
+| `get()` | Yes | Yes, when a tracking context is active |
+| `inspect()` | Yes | No |
 
-`get()` always performs an untracked read.
+`get()` reads the value and registers the active observer as a dependent of the signal when a tracking context exists. Outside a tracking context, it simply reads the value.
 
-`observe()` registers the active computation or scope as a dependent of the signal. If there is no active tracking context, the read does not create a dependency.
+`inspect()` always performs an untracked read, regardless of the active execution context.
 
 Dependency tracking is determined by the runtime's active execution context. The signal does not need to know whether it is being read by a scope, memo, or effect.
 
@@ -101,13 +102,18 @@ Dependency tracking is determined by the runtime's active execution context. The
 Both operations invalidate dependents and schedule the necessary reactive work. They do not synchronously execute queued effects, recompute dirty memos, or invoke queued subscription callbacks.
 
 ```rust
-let count = signal(0);
+let app = scope(|| {
+    let count = signal(0);
+    count
+});
+
+let count = app.run();
 
 count.set(10);
 
 // The stored value is already 10.
 // Dependent reactive work is pending.
-flush();
+app.flush();
 ```
 
 Signal writes do not inherently require `PartialEq`. The signal's change policy determines whether a write invalidates dependents; the default policy can treat every successful write as a change.
@@ -121,16 +127,16 @@ A memo is a persistent reactive computation. The runtime retains its latest resu
 ```rust
 let count = signal(42);
 
-let doubled = memo(|| count.observe() * 2);
+let doubled = memo(|| count.get() * 2);
 
 assert_eq!(doubled, 84);
 ```
 
-The memo computation executes immediately when the memo is first created. Reads through `observe()` establish its dependencies.
+The memo computation executes immediately when the memo is first created. Reads through `get()` establish its dependencies.
 
-`memo()` returns the computed result as an ordinary Rust value, not as a public memo handle. The returned value is a snapshot; it does not change when the memo recomputes.
+For an ordinary return type, `memo()` returns the computed result as an ordinary Rust value, not as a public memo handle. The returned value is a snapshot; it does not change when the memo recomputes.
 
-**Calling `memo()` also registers the memo's output with the currently active observer.** This allows a scope, memo, or effect to depend on the memo's output without exposing a `Memo::observe()` API.
+**Calling `memo()` also registers the memo's output with the currently active observer.** This allows a scope, memo, or effect to depend on the memo's output without exposing a `Memo::get()` or `Memo::observe()` API.
 
 When the memo's output changes, its dependents are notified. A dependent scope can be marked as needing another execution, while a dependent effect or memo can be invalidated for reevaluation. When the dependent executes again, it calls `memo()` and receives the latest computed result.
 
@@ -138,11 +144,11 @@ When the memo's output changes, its dependents are notified. A dependent scope c
 
 1. `memo()` creates or retrieves the memo in the active resource context.
 2. On first creation, the memo's computation executes immediately.
-3. Reads through `signal.observe()` and calls to other memos establish dependencies for the memo's computation.
+3. Reads through `signal.get()` and calls to other memos establish dependencies for the memo's computation.
 4. The runtime retains the computed result internally.
 5. The memo output is registered with the active observer, when one exists.
 6. When an input dependency changes, the memo is marked dirty and queued for recomputation.
-7. During `flush()`, the dirty memo recomputes.
+7. During `Scope::flush()`, the dirty memo recomputes.
 8. The runtime compares the new result with the previous result according to the memo's change policy.
 9. If the result changed, the runtime notifies output subscribers and invalidates downstream work.
 10. If the result did not change, downstream subscribers are not notified solely because the memo recomputed.
@@ -153,7 +159,7 @@ A memo must replace its dependency registrations after recomputation. If its com
 
 The memo's ordinary return value does not itself carry reactive behavior. Instead, calling `memo()` registers the memo's output with the currently active observer.
 
-This allows a scope, effect, or other supported observer to depend on a memo output without requiring the caller to invoke a public `Memo::observe()` method.
+This allows a scope, effect, or other supported observer to depend on a memo output without requiring the caller to invoke a public memo-handle method.
 
 For example, a memo called while a scope is executing can register its output as a dependency of that scope. When the memo's output changes, the scope can be notified that its result may need to be refreshed.
 
@@ -170,7 +176,7 @@ The distinction is important:
 For example, this effect captures an ordinary value and does not subscribe to the memo output merely by capturing it:
 
 ```rust
-let doubled = memo(|| count.observe() * 2);
+let doubled = memo(|| count.get() * 2);
 
 let _handle = effect(|| {
     println!("Doubled: {doubled}");
@@ -186,14 +192,14 @@ A memo may return a signal when the computation needs to expose its derived resu
 ```rust
 let count = signal(10);
 
-let doubled = memo(|| signal(count.observe() * 2));
+let doubled = memo(|| signal(count.get() * 2));
 
-effect(|| {
-    println!("count {}", count.observe());
+let _count_effect = effect(|| {
+    println!("Count: {}", count.get());
 });
 
-effect(|| {
-    println!("doubled {}", doubled.observe());
+let _doubled_effect = effect(|| {
+    println!("Doubled: {}", doubled.get());
 });
 ```
 
@@ -207,7 +213,7 @@ The intended behavior is:
 2. The memo retains ownership of that output signal's storage slot.
 3. The returned `doubled` handle refers to the retained slot.
 4. When `count` changes, the memo becomes dirty.
-5. During `flush()`, the memo recomputes and produces a candidate signal result.
+5. During `Scope::flush()`, the memo recomputes and produces a candidate signal result.
 6. The runtime extracts the candidate's value and updates the existing output slot rather than replacing it with the candidate's identity.
 7. Existing clones of `doubled` continue to refer to the same signal.
 8. If the output value changes according to the signal's change policy, its dependents are invalidated and queued through the normal scheduler.
@@ -251,25 +257,31 @@ If equality-based comparison uses ordinary floating-point `PartialEq`, `NaN` com
 An effect executes a closure for its side effects and tracks reactive dependencies read during execution.
 
 ```rust
-let count = signal(0);
+let app = scope(|| {
+    let count = signal(0);
 
-let handle = effect(|| {
-    println!("Count: {}", count.observe());
+    let _handle = effect(|| {
+        println!("Count: {}", count.get());
+    });
+
+    count
 });
 
+let count = app.run();
+
 count.set(1);
-flush();
+app.flush();
 ```
 
-An effect executes immediately when first created. Subsequent executions are deferred until pending work is processed by `flush()`.
+An effect executes immediately when first created. Subsequent executions are deferred until pending work is processed by `Scope::flush()`.
 
 ### Effect lifecycle
 
 1. `effect()` creates or retrieves the effect in the active resource context.
 2. On first creation, its closure executes immediately.
-3. Reads through `observe()` register dependencies with the effect.
+3. Reads through `get()` register dependencies with the effect.
 4. When a dependency changes, the effect is marked dirty and queued.
-5. During `flush()`, the effect executes again.
+5. During `Scope::flush()`, the effect executes again.
 6. The effect's dependencies are replaced with those read during the latest execution.
 
 Repeated invalidations should not create duplicate queue entries while the effect is already pending.
@@ -281,14 +293,20 @@ Effects must not execute synchronously from `set()` or `update()`. Initial execu
 Effects may contain conditionals because conditional logic does not inherently change the effect's own resource-creation sequence.
 
 ```rust
-let enabled = signal(false);
-let count = signal(0);
+let app = scope(|| {
+    let enabled = signal(false);
+    let count = signal(0);
 
-let _handle = effect(|| {
-    if enabled.observe() {
-        println!("Count: {}", count.observe());
-    }
+    let _handle = effect(|| {
+        if enabled.get() {
+            println!("Count: {}", count.get());
+        }
+    });
+
+    (enabled, count)
 });
+
+let (enabled, count) = app.run();
 ```
 
 When the effect reruns, its dependencies are updated to match the reads performed by that execution. If the condition is false, `count` is not read and is not a dependency of that execution. If the condition later becomes true, reading `count` establishes the dependency again.
@@ -302,12 +320,12 @@ Resource-creating calls inside a scope, memo, or effect must still follow the po
 A scope provides a persistent execution context for reactive resources. Unlike `memo()` and `effect()`, creating a scope does not execute its closure immediately.
 
 ```rust
-let s = scope(|| {
+let app = scope(|| {
     let count = signal(42);
-    let doubled = memo(|| count.observe() * 2);
+    let doubled = memo(|| count.get() * 2);
 
-    effect(|| {
-        println!("Count: {}", count.observe());
+    let _handle = effect(|| {
+        println!("Count: {}", count.get());
     });
 
     assert_eq!(doubled, 84);
@@ -317,26 +335,26 @@ let s = scope(|| {
 
 // The scope has not executed yet.
 
-let count = s.run();
+let count = app.run();
 
 // The scope has initialized and returned the signal.
 ```
 
-The first `s.run()` executes the scope closure, initializes its resources, establishes dependencies, and returns the closure's result.
+The first `app.run()` executes the scope closure, initializes its resources, establishes dependencies, and returns the closure's result.
 
-Subsequent calls to `s.run()` execute the closure again while reusing the resources associated with the corresponding positions in the resource sequence.
+Subsequent calls to `app.run()` execute the closure again while reusing the resources associated with the corresponding positions in the resource sequence. Each call returns the result produced by that execution.
 
 ### Persistent resource reuse
 
 Consider the following scope:
 
 ```rust
-let s = scope(|| {
+let app = scope(|| {
     let count = signal(42);
-    let doubled = memo(|| count.observe() * 2);
+    let doubled = memo(|| count.get() * 2);
 
-    effect(|| {
-        println!("Count: {}", count.observe());
+    let _handle = effect(|| {
+        println!("Count: {}", count.get());
     });
 
     (count, doubled)
@@ -365,10 +383,10 @@ Positional resource reuse requires a consistent sequence of resource-creating ca
 For example, this is invalid:
 
 ```rust
-let s = scope(|| {
+let app = scope(|| {
     let count = signal(0);
 
-    if count.get() > 10 {
+    if count.inspect() > 10 {
         let extra = signal(1);
     }
 
@@ -383,11 +401,11 @@ When the condition changes, the `last` signal can occupy a different resource po
 Instead, keep conditional logic inside a memo or effect:
 
 ```rust
-let s = scope(|| {
+let app = scope(|| {
     let count = signal(0);
 
     let extra = memo(|| {
-        if count.observe() > 10 {
+        if count.get() > 10 {
             1
         } else {
             0
@@ -406,7 +424,7 @@ The runtime should validate resource kind and type when reusing a slot and detec
 
 ### Scope dependencies
 
-A scope tracks reactive dependencies relevant to its own execution result. These include signals observed directly by the scope and memo outputs registered with the scope when `memo()` is called during its execution.
+A scope tracks reactive dependencies relevant to its own execution result. These include signals read directly by the scope through `get()` and memo outputs registered with the scope when `memo()` is called during its execution.
 
 Reads isolated inside a memo's or effect's computation belong to that computation's dependency context; they are not automatically attributed to the parent scope.
 
@@ -419,16 +437,16 @@ The scope closure is rerun only through an explicit execution request. Changes t
 A scope can expose an explicit subscription mechanism for notifications that its relevant reactive dependencies have changed.
 
 ```rust
-let s = scope(|| {
+let app = scope(|| {
     let count = signal(42);
-    let doubled = memo(|| count.observe() * 2);
+    let doubled = memo(|| count.get() * 2);
 
     (count, doubled)
 });
 
-let (count, _) = s.run();
+let (count, _) = app.run();
 
-let _subscription = s.subscribe(|| {
+let _subscription = app.subscribe(|| {
     println!("A scope dependency changed.");
 });
 
@@ -436,10 +454,10 @@ count.set(2);
 
 // The signal value changes immediately.
 // Queued reactive work remains pending.
-flush();
+app.flush();
 ```
 
-The memo initially returns `84`. After `count.set(2)`, the memo is invalidated and recomputes to `4` during `flush()`. If the output changes, the scope is notified through its memo-output dependency.
+The memo initially returns `84`. After `count.set(2)`, the memo is invalidated and recomputes to `4` during `app.flush()`. If the output changes, the scope is notified through its memo-output dependency.
 
 The scope subscription callback runs as part of the scheduler's notification work. It does not automatically rerun the scope closure; a caller or UI runtime can decide when to execute the scope again.
 
@@ -449,7 +467,7 @@ Subscription callbacks are explicit notification mechanisms. Reads performed ins
 
 The runtime separates invalidation from execution.
 
-Signal writes update stored state and schedule affected work. Memos, effects, and queued subscription callbacks execute later when `flush()` processes the scheduler queue.
+Signal writes update stored state and schedule affected work. Memos, effects, and queued subscription callbacks execute later when `Scope::flush()` processes the scheduler queue.
 
 The scheduler uses a deterministic queue order and must respect reactive dependencies. In particular, a dirty memo must recompute before subscribers are notified about its new output.
 
@@ -458,7 +476,7 @@ A typical update sequence is:
 1. A signal is updated.
 2. Dependent memos and effects are invalidated.
 3. The scheduler queues the affected work.
-4. `flush()` recomputes dirty memos.
+4. `Scope::flush()` recomputes dirty memos.
 5. Each memo compares its new result with its previous result.
 6. Changed memo outputs invalidate their subscribers.
 7. For signal-valued memos, the runtime updates the stable output signal and queues its dependents according to the normal signal scheduling rules.
@@ -493,7 +511,7 @@ batch(|| {
 });
 
 // Process the resulting pending work.
-flush();
+app.flush();
 ```
 
 Nested batches should defer scheduling until the outermost batch completes. Multiple writes in one batch can therefore invalidate several dependencies without triggering reactive execution between each write.
@@ -512,8 +530,8 @@ Entering a nested context temporarily replaces the active context. When the nest
 
 ### Dependency rules
 
-- `observe()` registers a dependency with the active observer.
-- `get()` never registers a dependency.
+- `get()` registers a dependency with the active observer when one exists.
+- `inspect()` never registers a dependency.
 - Memo computations track the reactive sources they read.
 - Effects track the reactive sources they read.
 - Scopes track sources relevant to their own execution result.
@@ -560,7 +578,7 @@ Tracks relationships between signals, memo outputs, effects, scopes, and explici
 
 ### Scheduler
 
-Queues invalidated computations and notification callbacks, deduplicates pending work, and processes queued work during `flush()`.
+Queues invalidated computations and notification callbacks, deduplicates pending work, and processes queued work during `Scope::flush()`.
 
 ### Disposal
 
@@ -648,8 +666,8 @@ Tests should cover each subsystem independently and then verify interactions bet
 ### Signals
 
 - Initial values and reads.
-- `get()` never tracks dependencies.
-- `observe()` tracks only when an appropriate observer is active.
+- `get()` tracks dependencies only when an appropriate observer is active.
+- `inspect()` never tracks dependencies.
 - `set()` and `update()` invalidate dependents without synchronously executing queued work.
 - Explicit subscriptions do not invoke callbacks immediately.
 - Batched writes do not execute queued work between writes.
@@ -661,17 +679,17 @@ Tests should cover each subsystem independently and then verify interactions bet
 - The runtime retains the latest result internally.
 - Calling `memo()` registers its output with the active observer.
 - Dependency changes queue recomputation.
-- Recomputations execute during `flush()`.
+- Recomputation executes during `Scope::flush()`.
 - Subscribers are notified only when the result changes under the configured policy.
 - Dependencies are replaced after recomputation.
 - Repeated invalidations are deduplicated.
-- No public `Memo::observe()` API is required.
+- No public memo-handle read method is required.
 
 ### Signal-valued memos
 
 - The initial execution creates a stable output signal.
 - The returned handle observes the initial computed value.
-- Recomputations update the existing output slot rather than replacing it.
+- Recomputation updates the existing output slot rather than replacing it.
 - Cloned output handles continue to refer to the same signal.
 - Output changes notify dependents through the normal signal scheduling path.
 - Unchanged output values do not cause unnecessary notifications under the configured change policy.
@@ -686,7 +704,7 @@ Tests should cover each subsystem independently and then verify interactions bet
 ### Effects
 
 - Initial execution happens immediately.
-- Subsequent execution is deferred until `flush()`.
+- Subsequent execution is deferred until `Scope::flush()`.
 - Dependencies are replaced after reruns.
 - Conditional reads add and remove dependencies correctly.
 - Repeated invalidations do not create duplicate pending entries.
@@ -695,8 +713,8 @@ Tests should cover each subsystem independently and then verify interactions bet
 ### Scopes
 
 - Creating a scope does not execute its closure.
-- The first `run()` initializes the scope.
-- Subsequent runs reuse signals, memos, and effects at their corresponding positions.
+- The first `run()` initializes the scope and returns its result.
+- Subsequent runs return fresh closure results while reusing signals, memos, and effects at their corresponding positions.
 - Reusing a signal does not reset its current value.
 - Resource cursors reset for each execution context.
 - Resource kind, type, and count mismatches are detected.
@@ -748,15 +766,17 @@ These capabilities can be considered separately without coupling the reactive co
 The implementation should preserve these core invariants:
 
 1. **Signals store state.** Writes update the value and invalidate dependents without synchronously running queued work.
-2. **Memos retain their latest result internally.** Ordinary returned values are snapshots, not reactive handles.
-3. **Memo calls establish output dependencies.** The active observer is registered as a dependent when `memo()` is called.
-4. **Signal-valued memos retain stable output identity.** Recomputations update the memo-owned output slot rather than replacing its signal identity.
-5. **Effects track their own reads.** Their dependencies are updated after every execution.
-6. **Scopes persist resources positionally.** Repeated executions reuse resources at corresponding positions rather than resetting or recreating them.
-7. **Resource order is stable.** Conditional resource creation is not allowed to shift the parent execution context's resource positions; conditional reactive logic belongs inside memos and effects.
-8. **Execution is deferred.** Subsequent reactive work is processed by `flush()`, while initial memo and effect execution remains immediate.
-9. **Scopes rerun explicitly.** Dependency notifications signal that a scope may need another execution but do not automatically execute it.
-10. **Ownership and disposal are deterministic.** Disposed resources cannot execute pending work or be accessed through stale handles.
-11. **Nested contexts remain isolated.** Dependencies and resource cursors belong to their own execution contexts, and the previous context is restored after nested execution.
+2. **Tracked reads use `get()`.** A read registers a dependency only when a tracking context is active.
+3. **Untracked reads use `inspect()`.** They never register a dependency.
+4. **Memos retain their latest result internally.** Ordinary returned values are snapshots, not reactive handles.
+5. **Memo calls establish output dependencies.** The active observer is registered as a dependent when `memo()` is called.
+6. **Signal-valued memos retain stable output identity.** Recomputation updates the memo-owned output slot rather than replacing its signal identity.
+7. **Effects track their own reads.** Their dependencies are updated after every execution.
+8. **Scopes persist resources positionally.** Repeated executions reuse resources at corresponding positions rather than resetting or recreating them.
+9. **Resource order is stable.** Conditional resource creation is not allowed to shift the parent execution context's resource positions; conditional reactive logic belongs inside memos and effects.
+10. **Execution is deferred.** Subsequent reactive work is processed by `Scope::flush()`, while initial memo and effect execution remains immediate.
+11. **Scopes rerun explicitly.** Dependency notifications signal that a scope may need another execution but do not automatically execute it.
+12. **Ownership and disposal are deterministic.** Disposed resources cannot execute pending work or be accessed through stale handles.
+13. **Nested contexts remain isolated.** Dependencies and resource cursors belong to their own execution contexts, and the previous context is restored after nested execution.
 
 These invariants define the contract between the reactive runtime and any consumer.
