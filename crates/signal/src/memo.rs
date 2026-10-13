@@ -3,9 +3,8 @@ use std::marker::PhantomData;
 use crate::Subscription;
 
 pub struct Memo<T> {
-	_data: PhantomData<T>
+    _data: PhantomData<T>,
 }
-
 
 impl<T> Memo<T> {
     /// Lazy exectute, cache the current value and registers the active reactive context as a
@@ -24,12 +23,12 @@ impl<T> Memo<T> {
         todo!()
     }
 
-	// should memo's be updatable like signals?
+    // should memo's be updatable like signals?
     //pub fn set(&self, _value: impl Into<T>) {
     //    todo!()
     //}
 
-	// should memo's be updatable like signals?
+    // should memo's be updatable like signals?
     //pub fn update(&self, _closure: impl Fn(T) -> T) -> &T {
     //    todo!()
     //}

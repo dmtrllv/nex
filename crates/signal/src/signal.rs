@@ -47,6 +47,8 @@ impl<T> Signal<T> {
     /// Dependency invalidation will be implemented in a later step.
     pub fn set(&self, value: impl Into<T>) {
         *self.inner.value.borrow_mut() = Some(value.into());
+
+        runtime::invalidate(&self.inner.source);
     }
 
     /// Replaces the current value with the result of `closure`.
@@ -64,6 +66,8 @@ impl<T> Signal<T> {
         let next = closure(current);
 
         *self.inner.value.borrow_mut() = Some(next);
+
+        runtime::invalidate(&self.inner.source);
 
         self.inspect()
     }

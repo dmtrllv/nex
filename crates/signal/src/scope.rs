@@ -30,7 +30,6 @@ pub struct Scope<T> {
     closure: Box<dyn Fn() -> T>,
     resources: Rc<RefCell<ResourceStore>>,
     result: Option<T>,
-    invalidated: bool,
     work_queue: VecDeque<Work>,
     observer: Rc<ObserverNode>,
 }
@@ -115,7 +114,7 @@ impl<T> Scope<T> {
     ///
     /// Resources are reused by their positions in the scope's execution.
     pub fn run(&mut self) -> &T {
-        if self.result.is_none() || self.invalidated {
+        if self.result.is_none() || self.observer.is_invalidated() {
             // reset the resource cursor
             {
                 let mut store = self.resources.borrow_mut();
@@ -123,6 +122,7 @@ impl<T> Scope<T> {
             }
 
             let result = {
+                self.observer.mark_valid();
                 runtime::clear_dependencies(&self.observer);
 
                 let _scope_guard = ActiveScopeGuard::enter(Rc::clone(&self.resources));
@@ -138,7 +138,6 @@ impl<T> Scope<T> {
             }
 
             self.result = Some(result);
-            self.invalidated = false;
         }
 
         self.result
@@ -165,7 +164,6 @@ pub fn scope<T>(closure: impl Fn() -> T + 'static) -> Scope<T> {
         closure: Box::new(closure),
         resources: Rc::new(RefCell::new(ResourceStore::default())),
         result: None,
-        invalidated: true,
         work_queue: VecDeque::new(),
         observer: ObserverNode::new(),
     }

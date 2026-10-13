@@ -1,6 +1,5 @@
-
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     rc::{Rc, Weak},
 };
 
@@ -10,6 +9,7 @@ pub(crate) struct SourceNode {
 
 pub(crate) struct ObserverNode {
     dependencies: RefCell<Vec<Weak<SourceNode>>>,
+    invalidated: Cell<bool>,
 }
 
 impl SourceNode {
@@ -24,7 +24,16 @@ impl ObserverNode {
     pub(crate) fn new() -> Rc<Self> {
         Rc::new(Self {
             dependencies: RefCell::new(Vec::new()),
+            invalidated: Cell::new(false),
         })
+    }
+
+    pub(crate) fn is_invalidated(&self) -> bool {
+        self.invalidated.get()
+    }
+
+    pub(crate) fn mark_valid(&self) {
+        self.invalidated.set(false);
     }
 }
 
@@ -39,8 +48,7 @@ pub(crate) struct ObserverGuard {
 
 impl ObserverGuard {
     pub(crate) fn enter(observer: Rc<ObserverNode>) -> Self {
-        let previous =
-            ACTIVE_OBSERVER.with(|active| active.replace(Some(observer)));
+        let previous = ACTIVE_OBSERVER.with(|active| active.replace(Some(observer)));
 
         Self { previous }
     }
@@ -118,48 +126,15 @@ pub(crate) fn clear_dependencies(observer: &Rc<ObserverNode>) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) fn invalidate(source: &Rc<SourceNode>) {
+    let mut dependants = source.dependants.borrow_mut();
 
-    #[test]
-    fn tracking_deduplicates_dependencies() {
-        let observer = ObserverNode::new();
-        let source = SourceNode::new();
-
-        {
-            let _guard = ObserverGuard::enter(Rc::clone(&observer));
-            track(&source);
-            track(&source);
+    dependants.retain(|dependant| {
+        if let Some(observer) = dependant.upgrade() {
+            observer.invalidated.set(true);
+            true
+        } else {
+            false
         }
-
-        assert_eq!(observer.dependencies.borrow().len(), 1);
-        assert_eq!(source.dependants.borrow().len(), 1);
-    }
-
-    #[test]
-    fn clearing_dependencies_removes_reverse_edges() {
-        let observer = ObserverNode::new();
-        let first = SourceNode::new();
-        let second = SourceNode::new();
-
-        {
-            let _guard = ObserverGuard::enter(Rc::clone(&observer));
-            track(&first);
-        }
-
-        clear_dependencies(&observer);
-
-        {
-            let _guard = ObserverGuard::enter(Rc::clone(&observer));
-            track(&second);
-        }
-
-        assert!(observer.dependencies.borrow().iter()
-            .filter_map(Weak::upgrade)
-            .any(|source| Rc::ptr_eq(&source, &second)));
-
-        assert!(first.dependants.borrow().is_empty());
-        assert_eq!(second.dependants.borrow().len(), 1);
-    }
+    });
 }

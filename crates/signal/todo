@@ -1,5 +1,5 @@
 Implementation order:
-	☐ 1	Reactive dependency tracking - The foundation for every dependent computation.
+	✔ 1	Reactive dependency tracking - The foundation for every dependent computation. @done(26-10-13 22:08)
 	☐ 2	Signal writes and invalidation - Connects changes to their dependents.
 	☐ 3	Scope invalidation and events - Makes scope results reactive and exposes scheduling information.
 	☐ 4	Subscriptions - Adds queued notifications and explicit unsubscription.

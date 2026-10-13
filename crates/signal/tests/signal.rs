@@ -17,16 +17,6 @@ fn signal_stores_and_updates_its_value() {
 }
 
 #[test]
-fn signal_resource_persists_across_scope_runs() {
-    let mut app = scope(|| signal(10));
-
-    app.run().set(20);
-
-    // The scope remains valid, so run() returns its cached result.
-    assert_eq!(app.run().value(), 20);
-}
-
-#[test]
 #[should_panic(expected = "signal() called outside an active scope")]
 fn signal_requires_an_active_scope() {
     let _count = signal(10);
@@ -103,7 +93,43 @@ fn update_can_consume_the_current_value() {
 }
 
 #[test]
-fn signal_value_persists_when_the_scope_closure_runs_again() {
+fn tracked_signal_write_invalidates_scope() {
+    let mut app = scope(|| {
+        let count = signal(1);
+        let observed = count.value();
+
+        (count, observed)
+    });
+
+    let (count, observed) = app.run();
+    assert_eq!(*observed, 1);
+
+    count.set(2);
+
+    let (_, observed) = app.run();
+    assert_eq!(*observed, 2);
+}
+
+#[test]
+fn update_invalidates_scope() {
+    let mut app = scope(|| {
+        let count = signal(1);
+        let observed = count.value();
+
+        (count, observed)
+    });
+
+    let (count, observed) = app.run();
+    assert_eq!(*observed, 1);
+
+    count.update(|value| value + 1);
+
+    let (_, observed) = app.run();
+    assert_eq!(*observed, 2);
+}
+
+#[test]
+fn untracked_read_does_not_invalidate_scope() {
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -112,13 +138,22 @@ fn signal_value_persists_when_the_scope_closure_runs_again() {
 
     let mut app = scope(move || {
         executions_for_scope.set(executions_for_scope.get() + 1);
-        signal(10)
+
+        let count = signal(1);
+        let observed = count.inspect_value();
+
+        (count, observed)
     });
 
-    app.run().set(20);
+    let (count, observed) = app.run();
+    assert_eq!(*observed, 1);
+    assert_eq!(executions.get(), 1);
 
-    // The current implementation does not expose a public invalidation
-    // operation yet, so verify caching rather than forcing a second run.
-    assert_eq!(app.run().value(), 20);
+    count.set(2);
+
+    let (_, observed) = app.run();
+
+    // The untracked read created no dependency, so the cached result remains.
+    assert_eq!(*observed, 1);
     assert_eq!(executions.get(), 1);
 }
