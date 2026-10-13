@@ -2,7 +2,7 @@ Implementation order:
 	✔ 1	Reactive dependency tracking - The foundation for every dependent computation. @done(26-10-13 22:08)
 	✔ 2	Signal writes and invalidation - Connects changes to their dependents. @done(26-10-13 22:25)
 	✔ 3	Scope invalidation and events - Makes scope results reactive and exposes scheduling information. @done(26-10-14 00:28)
-	☐ 4	Subscriptions - Adds queued notifications and explicit unsubscription.
+	✔ 4	Subscriptions - Adds queued notifications and explicit unsubscription. @done(26-10-14 01:25)
 	☐ 5	Memos - Adds cached computations, dynamic dependencies, and change detection.
 	☐ 6	Effects	Adds reactive side effects and queued execution.
 	☐ 7	flush()	Processes pending work and newly queued work correctly.

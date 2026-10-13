@@ -25,7 +25,7 @@ pub(crate) struct ObserverNode {
 }
 
 impl ObserverNode {
-    // TODO: remove after implementation is complete
+    /// This is only for testing
     #[allow(unused)]
     pub(crate) fn new() -> Rc<Self> {
         Rc::new(Self {
@@ -93,8 +93,6 @@ pub(crate) struct ScopeEventState {
     work_queue: RefCell<VecDeque<Work>>,
 }
 
-// TODO: remove after implementation is complete
-#[allow(unused)]
 impl ScopeEventState {
     pub(crate) fn queue_invalidated(&self) {
         if !self.invalidated_queued.replace(true) {
@@ -117,6 +115,10 @@ impl ScopeEventState {
         }
 
         Some(event)
+    }
+
+    pub(crate) fn has_events(&self) -> bool {
+        !self.queue.borrow().is_empty()
     }
 
     pub(crate) fn queue_work(&self, work: impl FnOnce() + 'static) {

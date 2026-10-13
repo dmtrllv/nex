@@ -18,7 +18,6 @@ enum Slot {
 
 type ScopeSubscriberFn<T> = dyn Fn(&mut Scope<T>, ScopeEvent);
 
-// TODO: remove after implementation is complete
 struct ScopeSubscriber<T> {
     active: Rc<Cell<bool>>,
     callback: Rc<ScopeSubscriberFn<T>>,
@@ -40,8 +39,6 @@ impl ResourceStore {
     }
 }
 
-// TODO: remove after implementation is complete
-#[allow(unused)]
 pub struct Scope<T> {
     closure: Box<dyn Fn() -> T>,
     resources: Rc<RefCell<ResourceStore>>,
@@ -123,11 +120,21 @@ pub(crate) fn signal_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState
     })
 }
 
-// TODO: remove after implementation is complete
-#[allow(unused)]
 impl<T> Scope<T> {
     pub fn flush(&mut self) {
-        todo!()
+        loop {
+            self.dispatch_events();
+
+            let Some(work) = self.events.pop_work() else {
+                if self.events.has_events() {
+                    continue;
+                }
+
+                break;
+            };
+
+            work();
+        }
     }
 
     /// Evaluates the scope if it has no cached result or was invalidated.
@@ -379,5 +386,81 @@ mod tests {
         scope.dispatch_events();
 
         assert_eq!(calls.get(), 0);
+    }
+
+    #[test]
+    fn flush_executes_queued_signal_subscription() {
+        let signal_handle = Rc::new(RefCell::new(None));
+        let handle = Rc::clone(&signal_handle);
+        let received = Rc::new(RefCell::new(Vec::new()));
+        let received_callback = Rc::clone(&received);
+
+        let mut scope = scope(move || {
+            let signal = crate::signal::signal(0);
+			let received_callback = received_callback.clone();
+            let _subscription = signal.subscribe(move |value| {
+                received_callback.borrow_mut().push(*value);
+            });
+
+            *handle.borrow_mut() = Some(signal);
+        });
+
+        scope.run();
+
+        signal_handle.borrow().as_ref().unwrap().set(10);
+
+        assert!(received.borrow().is_empty());
+
+        scope.flush();
+
+        assert_eq!(*received.borrow(), vec![10]);
+    }
+
+    #[test]
+    fn flush_processes_work_queued_by_another_work_item() {
+        let events = Rc::new(ScopeEventState::default());
+        let calls = Rc::new(Cell::new(0));
+
+        let mut scope = Scope {
+            closure: Box::new(|| ()),
+            resources: Rc::new(RefCell::new(ResourceStore::new(Rc::clone(&events)))),
+            result: None,
+            observer: ObserverNode::new_for_scope(&events),
+            events: Rc::clone(&events),
+            subscribers: Vec::new(),
+        };
+
+        let nested_events = Rc::clone(&events);
+        let nested_calls = Rc::clone(&calls);
+
+        events.queue_work(move || {
+            nested_calls.set(nested_calls.get() + 1);
+
+            let nested_calls = Rc::clone(&nested_calls);
+            nested_events.queue_work(move || {
+                nested_calls.set(nested_calls.get() + 1);
+            });
+        });
+
+        scope.flush();
+
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn flush_delivers_scope_events_without_queued_work() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let callback_calls = Rc::clone(&calls);
+
+        let mut scope = scope(|| ());
+        let _subscription = scope.subscribe(move |_, event| {
+            callback_calls.borrow_mut().push(event);
+        });
+
+        scope.events.queue_invalidated();
+
+        scope.flush();
+
+        assert_eq!(*calls.borrow(), vec![ScopeEvent::Invalidated]);
     }
 }
