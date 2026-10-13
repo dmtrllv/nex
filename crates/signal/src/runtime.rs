@@ -1,15 +1,11 @@
 use std::{
     cell::{Cell, RefCell},
+    collections::VecDeque,
     rc::{Rc, Weak},
 };
 
 pub(crate) struct SourceNode {
     dependants: RefCell<Vec<Weak<ObserverNode>>>,
-}
-
-pub(crate) struct ObserverNode {
-    dependencies: RefCell<Vec<Weak<SourceNode>>>,
-    invalidated: Cell<bool>,
 }
 
 impl SourceNode {
@@ -20,11 +16,26 @@ impl SourceNode {
     }
 }
 
+pub(crate) struct ObserverNode {
+    dependencies: RefCell<Vec<Weak<SourceNode>>>,
+    invalidated: Cell<bool>,
+    scope_events: Option<Weak<ScopeEventState>>,
+}
+
 impl ObserverNode {
     pub(crate) fn new() -> Rc<Self> {
         Rc::new(Self {
             dependencies: RefCell::new(Vec::new()),
             invalidated: Cell::new(false),
+            scope_events: None,
+        })
+    }
+
+    pub(crate) fn new_for_scope(events: &Rc<ScopeEventState>) -> Rc<Self> {
+        Rc::new(Self {
+            dependencies: RefCell::new(Vec::new()),
+            invalidated: Cell::new(false),
+            scope_events: Some(Rc::downgrade(events)),
         })
     }
 
@@ -61,6 +72,46 @@ impl Drop for ObserverGuard {
         ACTIVE_OBSERVER.with(|active| {
             active.replace(previous);
         });
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QueuedScopeEvent {
+    Invalidated,
+    Pending,
+}
+
+#[derive(Default)]
+pub(crate) struct ScopeEventState {
+    queue: RefCell<VecDeque<QueuedScopeEvent>>,
+    invalidated_queued: Cell<bool>,
+    pending_queued: Cell<bool>,
+}
+
+impl ScopeEventState {
+    pub(crate) fn queue_invalidated(&self) {
+        if !self.invalidated_queued.replace(true) {
+            self.queue
+                .borrow_mut()
+                .push_back(QueuedScopeEvent::Invalidated);
+        }
+    }
+
+    pub(crate) fn queue_pending(&self) {
+        if !self.pending_queued.replace(true) {
+            self.queue.borrow_mut().push_back(QueuedScopeEvent::Pending);
+        }
+    }
+
+    pub(crate) fn pop(&self) -> Option<QueuedScopeEvent> {
+        let event = self.queue.borrow_mut().pop_front()?;
+
+        match event {
+            QueuedScopeEvent::Invalidated => self.invalidated_queued.set(false),
+            QueuedScopeEvent::Pending => self.pending_queued.set(false),
+        }
+
+        Some(event)
     }
 }
 
@@ -130,12 +181,19 @@ pub(crate) fn invalidate(source: &Rc<SourceNode>) {
     let mut dependants = source.dependants.borrow_mut();
 
     dependants.retain(|dependant| {
-        if let Some(observer) = dependant.upgrade() {
-            observer.invalidated.set(true);
-            true
-        } else {
-            false
+        let Some(observer) = dependant.upgrade() else {
+            return false;
+        };
+
+        let was_invalidated = observer.invalidated.replace(true);
+
+        if !was_invalidated
+            && let Some(events) = observer.scope_events.as_ref().and_then(Weak::upgrade)
+        {
+            events.queue_invalidated();
         }
+
+        true
     });
 }
 
@@ -232,5 +290,36 @@ mod tests {
         invalidate(&source);
 
         assert!(source.dependants.borrow().is_empty());
+    }
+
+    #[test]
+    fn scope_invalidation_queues_one_event() {
+        let events = Rc::new(ScopeEventState::default());
+        let observer = ObserverNode::new_for_scope(&events);
+        let source = SourceNode::new();
+
+        {
+            let _guard = ObserverGuard::enter(Rc::clone(&observer));
+            track(&source);
+        }
+
+        invalidate(&source);
+        invalidate(&source);
+
+        assert_eq!(events.pop(), Some(QueuedScopeEvent::Invalidated));
+        assert_eq!(events.pop(), None);
+    }
+
+    #[test]
+    fn pending_and_invalidated_events_are_independent() {
+        let events = ScopeEventState::default();
+
+        events.queue_pending();
+        events.queue_invalidated();
+        events.queue_pending();
+
+        assert_eq!(events.pop(), Some(QueuedScopeEvent::Pending));
+        assert_eq!(events.pop(), Some(QueuedScopeEvent::Invalidated));
+        assert_eq!(events.pop(), None);
     }
 }

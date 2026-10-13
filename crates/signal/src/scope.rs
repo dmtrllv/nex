@@ -7,7 +7,7 @@ use std::{
 
 use crate::{
     Subscription,
-    runtime::{self, ObserverGuard, ObserverNode},
+    runtime::{self, ObserverGuard, ObserverNode, ScopeEventState},
 };
 
 enum Slot {
@@ -32,6 +32,7 @@ pub struct Scope<T> {
     result: Option<T>,
     work_queue: VecDeque<Work>,
     observer: Rc<ObserverNode>,
+    events: Rc<ScopeEventState>,
 }
 
 thread_local! {
@@ -160,11 +161,15 @@ pub enum ScopeEvent {
 }
 
 pub fn scope<T>(closure: impl Fn() -> T + 'static) -> Scope<T> {
+    let events = Rc::new(ScopeEventState::default());
+    let observer = ObserverNode::new_for_scope(&events);
+
     Scope {
         closure: Box::new(closure),
         resources: Rc::new(RefCell::new(ResourceStore::default())),
         result: None,
         work_queue: VecDeque::new(),
-        observer: ObserverNode::new(),
+        observer,
+		events
     }
 }
