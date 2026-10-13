@@ -14,6 +14,10 @@ enum Slot {
         type_id: TypeId,
         value: Box<dyn Any>,
     },
+    Memo {
+        type_id: TypeId,
+        value: Box<dyn Any>,
+    },
 }
 
 type ScopeSubscriberFn<T> = dyn Fn(&mut Scope<T>, ScopeEvent);
@@ -36,6 +40,41 @@ impl ResourceStore {
             cursor: 0,
             events,
         }
+    }
+
+    fn get_or_insert<T: 'static>(&mut self, create: impl FnOnce() -> T) -> Rc<T> {
+        let index = self.cursor;
+        self.cursor += 1;
+
+        if index < self.resources.len() {
+            match &self.resources[index] {
+                Slot::Signal { type_id, value } => {
+                    assert_eq!(
+                        *type_id,
+                        TypeId::of::<T>(),
+                        "resource type changed at slot {index}",
+                    );
+
+                    return Rc::clone(
+                        value
+                            .downcast_ref::<Rc<T>>()
+                            .expect("resource slot type metadata is inconsistent"),
+                    );
+                }
+                Slot::Memo { .. } => {
+                    panic!("resource kind changed at slot {index}");
+                }
+            }
+        }
+
+        let value = Rc::new(create());
+
+        self.resources.push(Slot::Signal {
+            type_id: TypeId::of::<T>(),
+            value: Box::new(Rc::clone(&value)),
+        });
+
+        value
     }
 }
 
@@ -81,43 +120,17 @@ impl Drop for ActiveScopeGuard {
 /// Resource identity is positional: the resource at the current cursor is
 /// reused when its stored type matches `T`.
 pub(crate) fn signal_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState>) -> T) -> Rc<T> {
-    ACTIVE_SCOPE.with(|active| {
-        let resources = active
+    let store = ACTIVE_SCOPE.with(|active| {
+        active
             .borrow()
             .as_ref()
             .cloned()
-            .expect("signal() called outside an active scope");
+            .expect("signals must be created inside an active scope")
+    });
 
-        let mut store = resources.borrow_mut();
-        let index = store.cursor;
-        store.cursor += 1;
+    let events = Rc::clone(&store.borrow().events);
 
-        if index < store.resources.len() {
-            match &store.resources[index] {
-                Slot::Signal { type_id, value } => {
-                    assert_eq!(
-                        *type_id,
-                        TypeId::of::<T>(),
-                        "signal resource type mismatch at slot {index}",
-                    );
-
-                    return value
-                        .downcast_ref::<Rc<T>>()
-                        .expect("signal resource storage type mismatch")
-                        .clone();
-                }
-            }
-        }
-
-        let value = Rc::new(create(Rc::clone(&store.events)));
-
-        store.resources.push(Slot::Signal {
-            type_id: TypeId::of::<T>(),
-            value: Box::new(Rc::clone(&value)),
-        });
-
-        value
-    })
+    store.borrow_mut().get_or_insert(|| create(events))
 }
 
 impl<T> Scope<T> {
@@ -397,7 +410,7 @@ mod tests {
 
         let mut scope = scope(move || {
             let signal = crate::signal::signal(0);
-			let received_callback = received_callback.clone();
+            let received_callback = received_callback.clone();
             let _subscription = signal.subscribe(move |value| {
                 received_callback.borrow_mut().push(*value);
             });

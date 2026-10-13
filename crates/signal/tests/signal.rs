@@ -17,7 +17,7 @@ fn signal_stores_and_updates_its_value() {
 }
 
 #[test]
-#[should_panic(expected = "signal() called outside an active scope")]
+#[should_panic(expected = "signals must be created inside an active scope")]
 fn signal_requires_an_active_scope() {
     let _count = signal(10);
 }
