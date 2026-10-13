@@ -24,8 +24,4 @@ impl Subscription {
     pub fn unsubscribe(self) {
         self.active.set(false);
     }
-
-    pub(crate) fn is_active(&self) -> bool {
-        self.active.get()
-    }
 }
