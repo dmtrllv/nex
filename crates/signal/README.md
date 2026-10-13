@@ -612,7 +612,3 @@ Add panic-injection tests to verify that a panic does not corrupt storage, leave
 5. **Deterministic scheduling.** State mutation and queued reactive execution remain separate operations.
 6. **Renderer independence.** The crate has no dependency on a particular UI framework or rendering backend.
 7. **Panic-safe runtime state.** Failures must not leave the reactive graph or execution context corrupted.
-
-## License
-
-See the repository's root license for the applicable license terms.

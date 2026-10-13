@@ -1,4 +1,4 @@
-use signal::{effect, memo, scope, signal};
+use signal::{ScopeEvent, effect, memo, scope, signal};
 
 fn main() {
     let mut app = scope(|| {
@@ -15,30 +15,34 @@ fn main() {
             println!("Cart total: €{:.2}", total.value());
         });
 
-        println!("Inspecing Price: €{:.2}", price.inspect());
+        println!("Inspecting price: €{:.2}", price.inspect());
 
         (price, quantity)
     });
 
-    // Initial execution creates the resources and returns their handles.
+    let _subscription = app.subscribe(|app, event| match event {
+        ScopeEvent::Invalidated => {
+            let (price, quantity) = app.run();
+
+            println!("--- Read current state ---");
+            println!("Price: €{:.2}", price.get());
+            println!("Quantity: {}", quantity.get());
+        }
+        ScopeEvent::Pending => {
+            app.flush();
+        }
+    });
+
     let (price, quantity) = app.run();
+    println!(
+        "Initial price: {}, quantity: {}",
+        price.value(),
+        quantity.value()
+    );
 
-    println!("--- Initial cart ---");
-    app.flush();
-
-    println!("--- Change quantity ---");
     quantity.set(3);
-    app.flush();
-
-    println!("--- Change price ---");
     price.set(30.0);
-    app.flush();
 
-    // Running the scope again reuses its resources.
-    let (price, quantity) = app.run();
-
-    println!("--- Read current state ---");
-    // If not in a reactive context just return the value like .inspect()
-    println!("Price: €{:.2}", price.get());
-    println!("Quantity: {}", quantity.get());
+    let result = app.run();
+    println!("Latest result: {result:?}");
 }

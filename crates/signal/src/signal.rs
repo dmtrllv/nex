@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::{fmt::Debug, marker::PhantomData};
 
 use crate::Subscription;
 
@@ -76,6 +76,12 @@ impl<T: Copy> Signal<T> {
     pub fn inspect_value(&self) -> T {
         *self.inspect()
     }
+}
+
+impl<T: Debug> Debug for Signal<T> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_tuple("Signal").field(self.inspect()).finish()
+	}
 }
 
 /// Creates a reactive signal initialized with `value`.
