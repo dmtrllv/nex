@@ -5,7 +5,10 @@ use std::{
     rc::Rc,
 };
 
-use crate::Subscription;
+use crate::{
+    Subscription,
+    runtime::{self, ObserverGuard, ObserverNode},
+};
 
 enum Slot {
     Signal {
@@ -29,6 +32,7 @@ pub struct Scope<T> {
     result: Option<T>,
     invalidated: bool,
     work_queue: VecDeque<Work>,
+    observer: Rc<ObserverNode>,
 }
 
 thread_local! {
@@ -112,14 +116,17 @@ impl<T> Scope<T> {
     /// Resources are reused by their positions in the scope's execution.
     pub fn run(&mut self) -> &T {
         if self.result.is_none() || self.invalidated {
-			// reset the resource cursor
+            // reset the resource cursor
             {
                 let mut store = self.resources.borrow_mut();
                 store.cursor = 0;
             }
 
             let result = {
-                let _guard = ActiveScopeGuard::enter(Rc::clone(&self.resources));
+                runtime::clear_dependencies(&self.observer);
+
+                let _scope_guard = ActiveScopeGuard::enter(Rc::clone(&self.resources));
+                let _observer_guard = ObserverGuard::enter(Rc::clone(&self.observer));
 
                 (self.closure)()
             };
@@ -160,5 +167,6 @@ pub fn scope<T>(closure: impl Fn() -> T + 'static) -> Scope<T> {
         result: None,
         invalidated: true,
         work_queue: VecDeque::new(),
+        observer: ObserverNode::new(),
     }
 }

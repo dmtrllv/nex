@@ -4,6 +4,7 @@ mod memo;
 mod scope;
 mod signal;
 mod subscription;
+mod runtime;
 
 pub use batch::batch;
 pub use effect::effect;
