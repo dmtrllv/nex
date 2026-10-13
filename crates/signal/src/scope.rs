@@ -1,5 +1,5 @@
 use std::{
-    any::{Any, TypeId, type_name},
+    any::{Any, TypeId},
     cell::RefCell,
     collections::VecDeque,
     rc::Rc,
@@ -10,7 +10,6 @@ use crate::Subscription;
 enum Slot {
     Signal {
         type_id: TypeId,
-        type_name: &'static str,
         value: Box<dyn Any>,
     },
 }
@@ -77,17 +76,11 @@ pub(crate) fn signal_resource<T: 'static>(create: impl FnOnce() -> T) -> Rc<T> {
 
         if index < store.resources.len() {
             match &store.resources[index] {
-                Slot::Signal {
-                    type_id,
-                    type_name: stored_type_name,
-                    value,
-                } => {
+                Slot::Signal { type_id, value } => {
                     assert_eq!(
                         *type_id,
                         TypeId::of::<T>(),
-                        "signal resource type mismatch at slot {index}: \
-                         stored {stored_type_name}, requested {}",
-                        type_name::<T>(),
+                        "signal resource type mismatch at slot {index}",
                     );
 
                     return value
@@ -102,7 +95,6 @@ pub(crate) fn signal_resource<T: 'static>(create: impl FnOnce() -> T) -> Rc<T> {
 
         store.resources.push(Slot::Signal {
             type_id: TypeId::of::<T>(),
-            type_name: type_name::<T>(),
             value: Box::new(Rc::clone(&value)),
         });
 
@@ -120,6 +112,7 @@ impl<T> Scope<T> {
     /// Resources are reused by their positions in the scope's execution.
     pub fn run(&mut self) -> &T {
         if self.result.is_none() || self.invalidated {
+			// reset the resource cursor
             {
                 let mut store = self.resources.borrow_mut();
                 store.cursor = 0;
