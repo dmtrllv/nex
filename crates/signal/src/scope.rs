@@ -170,6 +170,106 @@ pub fn scope<T>(closure: impl Fn() -> T + 'static) -> Scope<T> {
         result: None,
         work_queue: VecDeque::new(),
         observer,
-		events
+        events,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
+
+    #[test]
+    fn tracked_signal_change_invalidates_scope_and_queues_event() {
+        let count_handle = Rc::new(RefCell::new(None));
+        let handle = Rc::clone(&count_handle);
+
+        let mut scope = scope(move || {
+            let count = crate::signal::signal(0);
+            let _ = count.value();
+
+            *handle.borrow_mut() = Some(count);
+        });
+
+        scope.run();
+        assert!(!scope.observer.is_invalidated());
+        assert_eq!(scope.events.pop(), None);
+
+        count_handle.borrow().as_ref().unwrap().set(1);
+
+        assert!(scope.observer.is_invalidated());
+        assert_eq!(
+            scope.events.pop(),
+            Some(runtime::QueuedScopeEvent::Invalidated)
+        );
+        assert_eq!(scope.events.pop(), None);
+
+        scope.run();
+        assert!(!scope.observer.is_invalidated());
+        assert_eq!(count_handle.borrow().as_ref().unwrap().value(), 1);
+    }
+
+    #[test]
+    fn scope_reuses_cached_result_until_invalidated() {
+        let executions = Rc::new(Cell::new(0));
+        let execution_count = Rc::clone(&executions);
+        let count_handle = Rc::new(RefCell::new(None));
+        let handle = Rc::clone(&count_handle);
+
+        let mut scope = scope(move || {
+            execution_count.set(execution_count.get() + 1);
+
+            let count = crate::signal::signal(0);
+            let value = count.value();
+
+            *handle.borrow_mut() = Some(count);
+            value
+        });
+
+        assert_eq!(*scope.run(), 0);
+        assert_eq!(executions.get(), 1);
+
+        // A valid scope returns its cached result.
+        assert_eq!(*scope.run(), 0);
+        assert_eq!(executions.get(), 1);
+
+        // Updating the tracked signal invalidates the scope.
+        count_handle.borrow().as_ref().unwrap().set(1);
+
+        assert!(scope.observer.is_invalidated());
+        assert_eq!(*scope.run(), 1);
+        assert_eq!(executions.get(), 2);
+
+        // The new result is cached too.
+        assert_eq!(*scope.run(), 1);
+        assert_eq!(executions.get(), 2);
+    }
+
+    #[test]
+    fn tracked_signal_change_queues_scope_invalidation_event() {
+        let mut scope = scope(|| {
+            let count = crate::signal::signal(0);
+            let _ = count.value();
+            count
+        });
+
+        assert_eq!(scope.run().value(), 0);
+        assert!(!scope.observer.is_invalidated());
+        assert_eq!(scope.events.pop(), None);
+
+        scope.run().set(1);
+
+        assert!(scope.observer.is_invalidated());
+        assert_eq!(
+            scope.events.pop(),
+            Some(runtime::QueuedScopeEvent::Invalidated)
+        );
+        assert_eq!(scope.events.pop(), None);
+
+        assert_eq!(scope.run().value(), 1);
+        assert!(!scope.observer.is_invalidated());
     }
 }
