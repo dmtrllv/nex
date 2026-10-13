@@ -1,93 +1,83 @@
-use std::{cell::{Ref, RefCell}, fmt::Debug, ops::Deref, rc::Rc};
 
-use crate::Subscription;
+use std::{
+    cell::{Ref, RefCell},
+    fmt::Debug,
+    ops::Deref,
+    rc::Rc,
+};
+
+use crate::{scope::signal_resource, Subscription};
 
 /// A handle to a reactive value.
-///
-/// Reads through [`get`](Self::get) register the active reactive context as a
-/// dependency. Writes notify dependents according to the runtime's scheduling
-/// and change-detection rules.
 pub struct Signal<T> {
     value: Rc<RefCell<T>>,
 }
 
 impl<T> Signal<T> {
-    /// Reads the current value and registers the active reactive context as a
-    /// dependency, if one exists.
+    /// Reads the current value.
     ///
-    /// The returned reference is tied to the lifetime of this handle's borrow.
+    /// Dependency tracking will be added in a later implementation step.
     pub fn get(&self) -> Ref<'_, T> {
-        todo!()
+        self.value.borrow()
     }
 
-    /// Reads the current value without registering a reactive dependency.
+    /// Reads the current value without registering a dependency.
     ///
-    /// Use this when reading state should not cause the current reactive
-    /// context to rerun when the value changes.
+    /// Dependency tracking will be added in a later implementation step.
     pub fn inspect(&self) -> Ref<'_, T> {
-        todo!()
+        self.value.borrow()
     }
 
     /// Replaces the current value.
-    ///
-    /// The supplied value is converted into `T`. Dependents are invalidated
-    /// according to the signal's change-detection policy; queued reactive
-    /// work is processed by the runtime's scheduler.
-    pub fn set(&self, _value: impl Into<T>) {
-        todo!()
+    pub fn set(&self, value: impl Into<T>) {
+        *self.value.borrow_mut() = value.into();
     }
 
-    /// Updates the current value using a closure and returns a reference to
-    /// the resulting value.
+    /// Replaces the current value with the result of `closure`.
     ///
-    /// Unlike [`set`](Self::set), this operation can derive the new value from
-    /// the current one. Dependents are invalidated according to the signal's
-    /// change-detection policy.
-    pub fn update(&self, _closure: impl Fn(T) -> T) -> Ref<'_, T> {
-        todo!()
+    /// Requires `T: Clone` because the current value is retained in the
+    /// signal while a copy is passed to the closure.
+    pub fn update(&self, closure: impl Fn(T) -> T) -> Ref<'_, T>
+    where
+        T: Clone,
+    {
+        let current = self.value.borrow().clone();
+        let next = closure(current);
+
+        *self.value.borrow_mut() = next;
+
+        self.value.borrow()
     }
 
     /// Subscribes to changes in this signal.
-    ///
-    /// The callback receives a reference to the value when a change
-    /// notification is delivered. Returns a [`Subscription`] that can be
-    /// consumed to unsubscribe.
     pub fn subscribe(&self, _closure: impl Fn(&T)) -> Subscription {
         todo!()
     }
 }
 
 impl<T: Copy> Signal<T> {
-    /// Returns a copy of the current value and tracks the active reactive
-    /// context as a dependency, if one exists.
-    ///
-    /// This is equivalent to calling [`get`](Self::get) and copying the
-    /// result. Use [`inspect_value`](Self::inspect_value) to read a copy
-    /// without registering a dependency.
+    /// Returns a copy of the current value.
     pub fn value(&self) -> T {
         *self.get()
     }
 
-    /// Returns a copy of the current value without registering a reactive
-    /// dependency.
-    ///
-    /// This is equivalent to calling [`inspect`](Self::inspect) and copying
-    /// the result.
+    /// Returns a copy of the current value without tracking a dependency.
     pub fn inspect_value(&self) -> T {
         *self.inspect()
     }
 }
 
 impl<T: Debug> Debug for Signal<T> {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_tuple("Signal").field(self.inspect().deref()).finish()
-	}
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Signal")
+            .field(self.inspect().deref())
+            .finish()
+    }
 }
 
-/// Creates a reactive signal initialized with `value`.
-///
-/// The signal stores mutable state that can be read through tracked or
-/// untracked reads and updated through its handle.
-pub fn signal<T>(_value: T) -> Signal<T> {
-    todo!()
+/// Creates or retrieves a signal resource in the active scope.
+pub fn signal<T: 'static>(value: T) -> Signal<T> {
+    let value = signal_resource::<RefCell<T>>(|| RefCell::new(value));
+
+    Signal { value }
 }
