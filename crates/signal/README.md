@@ -2,11 +2,11 @@
 
 A generic, single-threaded reactive state-management crate written in Rust.
 
-The crate provides signals, lazy memos, effects, persistent scopes, subscriptions, batching, and a reactive scheduler. It is independent of any UI framework or renderer and is intended to provide the reactive foundation for UI rendering and other reactive systems.
+The crate provides signals, lazy memos, effects, persistent scopes, subscriptions, and batching. It is independent of any UI framework or rendering backend and can be integrated into synchronous applications, event loops, and asynchronous runtimes.
 
-The runtime separates state mutation, invalidation, computation, and side-effect execution. Signals store mutable state, memos cache derived values, effects react to tracked reads, and scopes manage persistent reactive resources.
+The runtime manages reactive state, tracks dependencies, and queues reactive work. **Scheduling belongs to the consumer.** The crate does not expose a global scheduler or decide when every scope should execute. Consumers use scope events to decide when to reevaluate a scope or flush its pending work.
 
-> **Development status:** The runtime is under implementation. This document describes the intended API and semantics. A feature should be considered implemented only when its implementation and tests are in place.
+> **Development status:** The runtime is under implementation. This document describes the intended API and semantics; behavior should be considered implemented only when supported by the code and tests.
 
 ## Example
 
@@ -17,7 +17,7 @@ cargo run -p signals-example
 ```
 
 ```rust
-use signal::{effect, memo, scope, signal};
+use signal::{ScopeEvent, effect, memo, scope, signal};
 
 fn main() {
     let mut app = scope(|| {
@@ -34,70 +34,113 @@ fn main() {
             println!("Cart total: €{:.2}", total.value());
         });
 
-        println!("Price without tracking: €{:.2}", price.inspect());
+        println!("Inspecting price: €{:.2}", price.inspect());
 
         (price, quantity)
     });
 
-    // Initial execution creates the resources.
+    let _subscription = app.subscribe(|app, event| match event {
+        ScopeEvent::Invalidated => {
+            let (price, quantity) = app.run();
+
+            println!("Price: €{:.2}", price.get());
+            println!("Quantity: {}", quantity.get());
+        }
+        ScopeEvent::Pending => {
+            app.flush();
+        }
+    });
+
     let (price, quantity) = app.run();
 
-    println!("--- Initial cart ---");
-    app.flush();
+    println!(
+        "Initial price: {}, quantity: {}",
+        price.value(),
+        quantity.value()
+    );
 
-    println!("--- Change quantity ---");
     quantity.set(3);
-    app.flush();
-
-    println!("--- Change price ---");
     price.set(30.0);
-    app.flush();
 
-    // Re-execution reuses the existing resources.
-    let (price, quantity) = app.run();
-
-    println!("--- Read current state ---");
-    println!("Price: €{:.2}", price.get());
-    println!("Quantity: {}", quantity.get());
+    // The consumer decides when to reevaluate or flush.
+    let result = app.run();
+    println!("Latest result: {result:?}");
 }
 ```
 
-The example illustrates the main distinctions:
+The example illustrates the main responsibilities:
 
-- `Signal<T>` stores mutable state.
-- `Memo<T>` represents a cached derived value.
-- `get()` and `value()` track reactive dependencies.
-- `inspect()` and `inspect_value()` read without tracking.
-- `Scope::run()` explicitly executes the scope closure.
-- `Scope::flush()` processes queued reactive work.
+- `Signal<T>` stores mutable reactive state.
+- `Memo<T>` lazily computes and caches a derived value.
+- `effect()` creates a reactive side effect.
+- `Scope<T>` owns a persistent execution context and cached result.
+- `ScopeEvent` communicates invalidation and pending work to the consumer.
+- `run()` reevaluates an invalidated scope or returns its cached result.
+- `flush()` drains pending reactive work belonging to that scope.
+- `subscribe()` registers callbacks for notifications.
+- The consumer decides when and how to respond to scope events.
 
-The memo is read through its handle. It does not return a snapshot that callers must capture and replace manually.
+The example demonstrates the intended API and scheduling model. Exact callback timing depends on the implementation of the runtime and its notification queue.
 
 ## Public API
 
-The crate exposes free functions that create or retrieve reactive resources in the active execution context.
-
 | API | Responsibility |
 |---|---|
-| `signal(value)` | Creates or retrieves a mutable reactive signal. |
-| `memo(f)` | Creates or retrieves a lazy, cached derived computation. |
+| `signal(value)` | Creates or retrieves a mutable signal in the active scope. |
+| `memo(f)` | Creates or retrieves a lazy, cached, read-only derived value. |
 | `effect(f)` | Creates or retrieves a reactive side effect. |
 | `scope(f)` | Creates a deferred, persistent execution scope. |
-| `get()` | Reads a value and tracks a dependency when tracking is active. |
-| `inspect()` | Reads a value without registering a dependency. |
-| `value()` | Copies a value when `T: Copy` and tracks a dependency. |
-| `inspect_value()` | Copies a value when `T: Copy` without tracking. |
+| `get()` | Reads a value and tracks a dependency. |
+| `inspect()` | Reads a value without tracking a dependency. |
+| `value()` | Copies a `Copy` value and tracks a dependency. |
+| `inspect_value()` | Copies a `Copy` value without tracking. |
 | `set(value)` | Replaces a signal's value. |
-| `update(f)` | Computes a replacement signal value from its current value. |
-| `subscribe(f)` | Registers an explicit signal change callback. |
-| `run()` | Executes a scope closure and returns its result. |
-| `flush()` | Processes queued reactive work. |
-| `batch(f)` | Groups writes into a scheduling interval. |
-| `unsubscribe()` | Removes an explicit subscription. |
+| `update(f)` | Computes a replacement signal value. |
+| `subscribe(f)` | Subscribes to signal, memo, or scope notifications. |
+| `run()` | Evaluates an invalidated scope or returns its cached result. |
+| `result()` | Returns the cached scope result, if available, without evaluating. |
+| `flush()` | Drains pending reactive work belonging to a scope. |
+| `batch(f)` | Groups writes into a batch. |
+| `unsubscribe()` | Explicitly removes a subscription. |
 
-`Signal<T>` and `Memo<T>` are handles to reactive values. They are intended to share a read-only interface, while mutation operations remain specific to signals.
+`Signal<T>` and `Memo<T>` share read and subscription semantics, but only signals are directly mutable. A memo's value is controlled by its computation and dependencies.
 
-Exact trait definitions, return types, disposal behavior, and scheduling details are governed by the implementation.
+## Reactive reads
+
+Reactive dependency tracking is based on reads performed while a reactive computation is active.
+
+| Operation | Tracks a dependency? | Returns a copy? |
+|---|---|---|
+| `get()` | Yes | No |
+| `inspect()` | No | No |
+| `value()` | Yes | Yes, for `T: Copy` |
+| `inspect_value()` | No | Yes, for `T: Copy` |
+
+A tracked read registers the active reactive context as a dependent of the value being read. An untracked read obtains the value without registering that dependency.
+
+For example:
+
+```rust
+let count = signal(0);
+
+effect(|| {
+    println!("Count: {}", count.value());
+});
+```
+
+The effect depends on `count` because it reads the signal through `value()`.
+
+By contrast:
+
+```rust
+effect(|| {
+    println!("Count: {}", count.inspect_value());
+});
+```
+
+This read does not make the effect depend on `count`.
+
+The same distinction applies to memos. Whether a read tracks a dependency is determined by the chosen read method, not by whether reading a dirty memo causes it to recompute.
 
 ## Signals
 
@@ -109,44 +152,31 @@ let count = signal(0);
 count.set(1);
 count.update(|value| value + 1);
 
-assert_eq!(*count.inspect(), 2);
+assert_eq!(count.inspect_value(), 2);
 ```
 
-### Tracked and untracked reads
+### Writes and invalidation
 
-| Operation | Reads the value | Registers a dependency |
-|---|---|---|
-| `get()` | Yes | Yes, when tracking is active |
-| `value()` | Yes, by copying | Yes |
-| `inspect()` | Yes | No |
-| `inspect_value()` | Yes, by copying | No |
+`set()` replaces the stored value. `update()` computes a replacement from the current value.
 
-Dependency tracking is determined by the active execution context. A read inside a memo computation establishes a dependency for that memo; a read inside an effect establishes a dependency for that effect.
+A write may invalidate dependent memos, effects, scopes, and subscriptions according to their respective semantics. Invalidating a dependent does not mean that all resulting work executes immediately.
 
-Untracked reads do not create dependency edges. They are useful when a computation needs to inspect a value without reacting to subsequent changes.
+The intended processing sequence is:
 
-### Writes
+1. A write updates a signal.
+2. Relevant dependents are invalidated.
+3. Required reactive work and notifications are queued in the appropriate scope.
+4. Duplicate pending work is coalesced.
+5. The consumer decides when to flush the scope.
+6. The runtime processes the queued work and any further work produced during processing.
 
-`set()` replaces the current value. `update()` computes a replacement from the current value.
+A signal can be written multiple times before its scope is flushed. The runtime should avoid queueing the same pending work repeatedly when one queued execution or notification is sufficient.
 
-```rust
-items.update(|mut items| {
-    items.push(4);
-    items
-});
-```
-
-This ownership-based update pattern allows collections to be modified without cloning the entire collection.
-
-A successful write invalidates dependents according to the signal's change-detection policy. It does not directly execute queued effects or subscription callbacks.
-
-An update should commit its replacement before notifying dependents. Multiple mutations performed inside one update closure should not produce separate notifications for each mutation.
-
-**Panic safety is a requirement.** If an update closure panics, the runtime must not lose the stored value or leave signal storage in an invalid state. See [Panic guards](#panic-guards).
+Deduplication applies to pending work, not to the writes themselves. Each write still updates the signal's current value.
 
 ### Subscriptions
 
-A subscription registers an explicit callback for signal changes.
+A signal subscription registers a callback for signal change notifications.
 
 ```rust
 let count = signal(0);
@@ -157,55 +187,59 @@ let subscription = count.subscribe(|value| {
 
 count.set(1);
 
-// Explicitly remove the subscription when it is no longer needed.
+// Remove the subscription explicitly.
 subscription.unsubscribe();
 ```
 
-Subscription callbacks follow the runtime's scheduling rules. A write must not unexpectedly execute queued callbacks synchronously.
+A subscription is an explicit notification mechanism, distinct from dependency tracking.
 
-The runtime must define callback timing, repeated-write coalescing, and behavior when a subscription is removed while a notification is pending.
+- An **effect** tracks reactive reads and reruns when its dependencies require it.
+- A **subscription** listens for notifications from the signal or memo to which it is attached.
+
+Subscription callbacks are queued as reactive work rather than invoked immediately in the middle of a write. The owning scope's flush processes that work.
+
+If a subscription already has a pending notification, additional invalidations should not create duplicate pending entries for that subscription. The callback observes state according to the subscription's documented callback contract; consumers should not assume that every intermediate value is delivered unless that behavior is explicitly guaranteed.
+
+Unsubscription must prevent future callback execution according to the runtime's disposal contract, including the case where a notification is already queued.
 
 ## Memos
 
-A memo is a cached reactive computation. It retains the latest computed result and tracks the reactive sources read by its computation.
+A memo is a read-only, cached computation derived from reactive values.
 
 ```rust
 let count = signal(21);
-
 let doubled = memo(|| count.value() * 2);
 
-assert_eq!(*doubled.get(), 42);
+assert_eq!(doubled.value(), 42);
 ```
 
-Unlike a function that recalculates its result on every call, a memo reuses its cached result while it remains valid.
+`memo()` returns a `Memo<T>` handle, not the computed `T` directly. The handle retains the cached result and the dependencies observed by its computation.
 
-`memo()` returns a `Memo<T>` handle. It does not return the computed `T` directly.
+Memos are read-only with respect to their derived values, but they can be subscribed to. Subscribers are notified when the memo's output changes according to its change-detection policy.
 
 ### Lazy evaluation
 
-A memo evaluates its computation when its result is first requested. If an input later changes, the memo becomes dirty. It recomputes the next time a tracked or untracked read requires its value.
+A memo evaluates its computation when its result is first requested. Once computed, the result is reused until the memo is invalidated.
 
-Conceptually, the lifecycle is:
+When an input changes, the memo becomes dirty. It recomputes the next time a read requires its value.
 
-1. `memo(f)` creates or retrieves the memo resource.
-2. The first `get()`, `inspect()`, `value()`, or `inspect_value()` evaluates the computation if no cached result exists.
-3. Reactive reads performed by the computation establish its input dependencies.
-4. The computed result is cached.
-5. A dependency change invalidates the memo.
-6. The next read recomputes the result if the memo is dirty.
-7. The cache is updated, and downstream invalidation follows the memo's change-detection policy.
+The intended lifecycle is:
+
+1. Create or retrieve the memo resource.
+2. Evaluate the computation on the first read.
+3. Track the reactive sources read during computation.
+4. Cache the result.
+5. Mark the memo dirty when a dependency changes.
+6. Recompute on a subsequent read when the cache is dirty.
+7. Determine whether the recomputed output changed.
+8. If the output changed, invalidate downstream dependents and queue the relevant notifications.
 
 Reading a clean memo does not rerun its computation.
 
-`get()` and `value()` register the active reactive context as a dependent of the memo. `inspect()` and `inspect_value()` deliberately do not.
-
-### Tracked memo reads
-
-A memo can be used as a dependency of another memo or effect.
+### Tracked and untracked memo reads
 
 ```rust
 let count = signal(10);
-
 let doubled = memo(|| count.value() * 2);
 
 effect(|| {
@@ -213,42 +247,15 @@ effect(|| {
 });
 ```
 
-The effect tracks the memo output because it calls `doubled.value()` while executing.
+The effect depends on `doubled` because it performs a tracked read.
 
-When `count` changes, the memo becomes dirty. The reactive runtime must ensure that the effect can obtain the current memo result when it executes, rather than reading a stale cached value.
+Using `doubled.inspect_value()` instead reads the memo without registering the effect as a dependent through that read.
 
-The distinction between a tracked read and an untracked read is significant:
+Both tracked and untracked reads must return a current value. If a memo is dirty, reading it must recompute it before returning the result.
 
-```rust
-effect(|| {
-    println!("{}", doubled.value());
-});
-```
+### Dynamic dependencies
 
-This effect depends on `doubled`.
-
-```rust
-effect(|| {
-    println!("{}", doubled.inspect_value());
-});
-```
-
-This effect does not depend on `doubled` through that read. It may still depend on other sources read by its closure.
-
-### `get()` versus `inspect()`
-
-Both methods return the current memo result, computing it first if necessary.
-
-- `get()` tracks the memo as a dependency of the active reactive context.
-- `inspect()` performs the same lazy read without adding a dependency.
-
-The same distinction applies to `value()` and `inspect_value()` for `T: Copy`.
-
-The read operation determines whether a dependency is registered; the fact that a read causes recomputation does not make it a tracked read.
-
-### Dependency replacement
-
-A memo's dependencies must reflect the sources read during its latest successful computation.
+A memo's dependencies must match the sources read during its latest successful computation.
 
 ```rust
 let use_first = signal(true);
@@ -264,38 +271,58 @@ let selected = memo(|| {
 });
 ```
 
-Initially, `selected` depends on `use_first` and `first`. After `use_first` becomes false and the memo recomputes, it should depend on `use_first` and `second`. It must no longer react to changes in `first`.
+Initially, `selected` depends on `use_first` and `first`. After switching to `second` and recomputing, it should stop depending on `first`.
 
-Dependency replacement must not leave obsolete subscriptions behind. Failed computations must not be treated as successful dependency updates.
+The runtime must remove obsolete dependency edges when replacing a memo's dependency set.
+
+### Memo subscriptions and downstream effects
+
+A memo's subscription callbacks and its reactive dependents serve related but distinct purposes.
+
+```rust
+let count = signal(1);
+let doubled = memo(|| count.value() * 2);
+
+let _subscription = doubled.subscribe(|value| {
+    println!("Doubled changed: {value}");
+});
+
+effect(|| {
+    println!("Effect sees: {}", doubled.value());
+});
+```
+
+When `count` changes, `doubled` becomes dirty. When the memo recomputes, the runtime determines whether its output changed.
+
+If the output changed:
+
+- The memo's reactive dependents, including effects that read it through tracked reads, must be invalidated.
+- The memo's subscribers must have their notifications queued as scope work.
+- Repeated invalidations must not create duplicate pending entries for the same work item.
+
+The dependent effect must see the current memo value when it executes. The runtime must therefore ensure that dirty memos are brought up to date before dependent work consumes their values.
+
+Memo notifications should not execute subscriber callbacks in the middle of memo recomputation. They should be delivered through the scope's pending-work mechanism.
 
 ### Memo change detection
 
-Invalidation and value change are different concepts.
+Invalidation, recomputation, and output change are different concepts.
 
-An input can change while the memo's computed result remains the same. For example, a memo that computes `count.value() > 0` can recompute when `count` changes from `1` to `2` while still producing `true`.
+For example, a memo computing `count.value() > 0` may recompute when `count` changes from `1` to `2`, while its output remains `true`.
 
-The runtime should distinguish:
+The runtime should distinguish these cases:
 
 - **Invalidation:** an input changed, so the cached result may be stale.
-- **Recomputation:** the memo evaluates its closure to obtain a current result.
-- **Output change:** the new result differs according to the memo's comparison policy.
-- **Downstream notification:** dependent work is scheduled according to the output-change policy.
+- **Recomputation:** the memo evaluates its computation to produce a current result.
+- **Output change:** the newly computed result differs according to the memo's change-detection policy.
 
-The comparison policy must be defined by the implementation. It should not silently require `T: PartialEq` for every memo unless that is an intentional API constraint. An explicit comparator or a separate equality-aware API are alternatives.
+A memo's subscribers should be notified when the output is considered changed, not merely because the memo became dirty. The exact equality or change-detection policy must be defined by the implementation and must not accidentally impose a `PartialEq` bound on all memo values.
 
-For floating-point values, ordinary `PartialEq` semantics mean that `NaN != NaN`. An equality-based memo can therefore treat a newly computed `NaN` as a change even if the previous result was also `NaN`.
-
-### Read-only semantics
-
-A memo's value is derived from its computation. Callers should not be able to replace it through `set()` or `update()`.
-
-If the value needs to change, its input signals should change. The memo will then become dirty and compute a new result when read.
-
-`Signal<T>` and `Memo<T>` should share the common read interface, but signal mutation and memo evaluation remain distinct responsibilities.
+Memos are read-only. To change a memo's result, change one of its input signals.
 
 ## Effects
 
-An effect runs a closure for its side effects and tracks the reactive values read during execution.
+An effect performs side effects in response to changes in the reactive values it reads.
 
 ```rust
 let count = signal(0);
@@ -305,310 +332,269 @@ effect(|| {
 });
 ```
 
-An effect executes when first created. Later executions are scheduled when its tracked dependencies change.
+An effect executes on its initial creation. Reactive reads during execution establish its dependencies. When a dependency changes, the effect is invalidated and its subsequent execution is scheduled as pending work.
 
-### Effect lifecycle
+The intended lifecycle is:
 
-1. `effect(f)` creates or retrieves an effect resource.
-2. The initial execution runs the closure.
-3. Reactive reads establish the effect's dependencies.
-4. Changes to those dependencies invalidate and queue the effect.
-5. `flush()` processes queued effect work.
-6. Each successful rerun replaces the effect's dependencies with those observed during the latest execution.
+1. Create or retrieve the effect resource.
+2. Execute the effect initially.
+3. Track the dependencies read during execution.
+4. Invalidate and queue the effect when a dependency changes.
+5. Deduplicate its pending work by stable work identity.
+6. Execute pending work when its owning scope is flushed.
+7. Replace the effect's dependencies after a successful rerun.
 
-Pending work should be deduplicated so repeated invalidations do not add duplicate queue entries for the same pending effect.
+Conditional reads are supported, so an effect's dependency set can change between executions.
 
-### Dynamic dependencies
-
-Conditional reads are supported.
-
-```rust
-let enabled = signal(false);
-let count = signal(0);
-
-effect(|| {
-    if enabled.value() {
-        println!("Count: {}", count.value());
-    }
-});
-```
-
-When `enabled` is false, the effect does not read `count`. After that execution, `count` should not remain a dependency of the effect. If `enabled` becomes true, the next execution reads `count` and establishes the dependency again.
-
-Dynamic dependencies do not remove the resource-ordering requirements for resource-creating calls.
+An effect that depends on a memo must observe the current memo result when it runs. If the memo's output has not changed, the runtime should avoid rerunning the effect solely because an upstream input changed, provided the implementation's change-detection policy supports that guarantee.
 
 ## Scopes
 
-A scope is a deferred, persistent execution context for reactive resources.
+A scope is a deferred, persistent execution context that owns reactive resources and a cached result.
 
 ```rust
-let app = scope(|| {
+let mut app = scope(|| {
     let count = signal(42);
     let doubled = memo(|| count.value() * 2);
 
     (count, doubled)
 });
-
-let (count, doubled) = app.run();
 ```
 
-Creating a scope does not execute its closure. The first `run()` initializes the scope's resources, establishes dependencies, and returns the closure's result.
+Creating a scope does not execute its closure. The consumer explicitly calls `run()` to obtain its initial result.
 
-Subsequent `run()` calls execute the closure again while reusing resources at corresponding positions. Existing signal values are preserved; rerunning the scope must not reset them to their initial values.
+### `run()`
+
+`run()` evaluates the scope when its result is unavailable or invalidated. If the scope is already valid, it returns the cached result rather than executing the closure again.
+
+```rust
+let first = app.run();
+let second = app.run();
+```
+
+If no relevant dependency changed between these calls, the second call should reuse the result of the first execution.
+
+The scope closure uses persistent resource identity: signals, memos, and effects created at corresponding resource positions are reused across runs. Existing signal values must not be reset to their initial values merely because the scope is reevaluated.
+
+### `result()`
+
+`result()` returns `Option<&T>` for the currently cached scope result.
+
+- `None` means the scope has not produced a result yet.
+- `Some(&T)` provides access to the cached result.
+- Calling `result()` does not run the scope or force reevaluation.
+
+Use `result()` when the consumer needs to inspect the cached output without triggering execution.
 
 ### Positional resource reuse
 
-The runtime associates resource-creating calls with positions in each execution context. The order of these calls must remain stable between executions.
+Resources are associated with their positions in the scope's execution sequence. Resource-creating calls should remain in a stable order between runs.
 
-For example, a later call to `signal(42)` at the same position retrieves the existing signal rather than resetting its value to `42`. The same principle applies to memos and effects.
+Conditionally creating a signal before another signal can shift the latter's position and cause the runtime to associate a slot with the wrong logical resource.
 
-Conditional resource creation that shifts the sequence is invalid:
+Keep conditional logic inside a stable memo or effect rather than conditionally changing the scope's resource-creation sequence. The runtime should validate resource kinds and types when reusing slots, although same-type logical swaps cannot always be detected automatically.
+
+### Scope invalidation
+
+A scope tracks the dependencies relevant to its execution result. When a relevant dependency changes, the scope becomes invalidated.
+
+**Invalidation does not automatically execute the scope closure.** It tells the consumer that the cached result may no longer be current. The consumer decides when to call `run()` again.
+
+Reads inside a memo belong to that memo's computation. They should not automatically become direct dependencies of the enclosing scope merely because the memo was read while the scope was executing.
+
+## Scope events and subscriptions
+
+Scopes expose notifications through `Scope::subscribe()`.
 
 ```rust
-let app = scope(|| {
+let mut app = scope(|| {
     let count = signal(0);
+    count
+});
 
-    if count.inspect_value() > 10 {
-        let extra = signal(1);
+let subscription = app.subscribe(|app, event| {
+    match event {
+        ScopeEvent::Invalidated => {
+            let count = app.run();
+            println!("Current count: {}", count.get());
+        }
+        ScopeEvent::Pending => {
+            app.flush();
+        }
     }
-
-    let last = signal(30);
-
-    (count, last)
 });
 ```
 
-When the condition changes, `last` may occupy a different resource position. The runtime cannot reliably infer the intended identity of resources that have shifted.
+The callback receives access to the scope so the consumer can respond to notifications. The consumer is responsible for deciding how to schedule that response.
 
-Keep conditional reactive logic inside a memo or effect whose own resource position is stable. Resource-creating calls must still obey the ordering rules of their execution context.
+### `ScopeEvent::Invalidated`
 
-The runtime should validate resource kinds, types, and resource counts when reusing cached positions. These checks can detect common mistakes but cannot detect every semantic swap between resources of the same type.
+Indicates that the cached scope result is invalid and should be reevaluated when appropriate.
 
-### Scope dependencies
+The consumer can call `run()` immediately, schedule a later run, or mark the scope as needing reevaluation in its own application scheduler.
 
-A scope tracks dependencies relevant to its execution result, including direct tracked reads and tracked memo reads performed while the scope is active.
+Repeated invalidations should not generate redundant notifications while an equivalent invalidation notification is already pending.
 
-A signal read inside a memo belongs to the memo's computation. It must not automatically be registered as a direct dependency of the enclosing scope.
+### `ScopeEvent::Pending`
 
-When a relevant dependency changes, the scope can be marked as needing reevaluation. This notification does not automatically rerun the scope closure. The caller or UI runtime decides when to call `run()` again.
+Indicates that the scope has reactive work waiting to be processed.
 
-This separation lets a UI runtime decide when a component or scope should be reevaluated.
+The consumer can call `flush()` immediately or arrange for it to run later. If additional work is queued while work is already pending, the consumer should not need a separate wake-up for every item.
+
+The runtime must ensure that the pending state accurately reflects whether scope work remains to be processed.
+
+### Event delivery and reentrancy
+
+Invalidation and pending work are distinct conditions and should be tracked independently.
+
+Notifications are queued rather than delivered synchronously in the middle of a signal write, memo recomputation, or other reactive operation. Repeated notifications for the same pending condition should be coalesced.
+
+Event delivery must account for reentrancy. A callback may call `run()` or `flush()`, and those operations may produce further events. The runtime should queue or defer those events safely instead of causing uncontrolled nested notification delivery.
+
+Consumers should rely on the documented meaning of events, not on incidental callback ordering beyond the established contract.
+
+## Flushing and scheduling
+
+The crate does **not** own a global scheduler. It provides the scope operations required for a consumer to implement scheduling.
+
+`Scope::flush()` drains pending reactive work belonging to that scope. It must not drain another scope's work as a side effect.
+
+Pending work can include effect executions, signal or memo subscription callbacks, and other reactive notifications associated with the scope.
+
+### Queued work and deduplication
+
+The runtime maintains pending reactive work in scope-owned queues. Work is queued for later processing rather than executed immediately at the point of invalidation.
+
+The queue follows these semantics:
+
+1. When reactive work becomes necessary, enqueue it in the appropriate scope queue.
+2. Identify work using a stable internal identity.
+3. If that work is already queued, do not enqueue another copy in the same queue.
+4. When `flush()` processes an item, remove its pending status at the appropriate point.
+5. If processing an item creates additional work, enqueue that work according to the same rules.
+6. Continue processing until the scope's queue has no remaining work.
+
+Deduplication is based on work identity, not callback equality. Distinct subscriptions remain distinct even if they use similar callbacks.
+
+Deduplication does not discard writes. Signals still store their latest values; the queue avoids redundant processing of work that is already pending.
 
 ### Flushing
 
-The runtime separates state changes from reactive execution:
+`Scope::flush()` drains the scope's pending reactive work until its queue is empty. This includes work queued while the flush is already running.
 
-- `set()` and `update()` mutate signal state and invalidate dependents.
-- Invalidated memos become dirty.
-- Effects and subscription callbacks are queued according to the scheduler's rules.
-- A read of a dirty memo recomputes it.
-- `flush()` processes queued reactive work.
-- A scope can be rerun explicitly with `run()`.
+A flush may execute effects, subscription callbacks, and other reactive work associated with the scope. Processing one item may invalidate computations or enqueue further notifications, which are processed during the same flush.
 
-The scheduler must define how it handles work queued during a flush and how it prevents stale memo results from being observed by dependents.
+The runtime must ensure that pending-work bookkeeping remains correct when an item is executing and causes itself or other work to be queued again.
 
-Lazy memo evaluation does not mean that effects are lazy in the same way. Effects execute according to their scheduling rules; when an effect reads a dirty memo, that read must obtain the current result.
+Reactive cycles or callbacks that continually generate new work can prevent a queue from becoming empty. Cycle detection or other protections may be considered separately; they must not silently change the normal contract that `flush()` drains newly queued work in the same call.
+
+### Batching and queue separation
+
+Batching will introduce separate queues for work associated with different batching states. This allows the runtime to defer processing until the relevant batch completes, rather than processing work between every write.
+
+When batching is implemented, the queue-selection and release rules must preserve scope ownership and work deduplication. `flush()` should drain the queue or queues that are eligible for processing under the active batching rules, including newly queued eligible work, without processing work that remains deferred by an active batch.
+
+### Work created during a flush
+
+Processing queued work can invalidate additional computations or enqueue more notifications. The runtime should process newly queued work consistently and should normally continue draining until the scope has no pending work.
+
+The implementation must also account for reactive cycles or callbacks that continually produce more work. A work limit or equivalent cycle-handling policy may be needed to prevent a flush from running indefinitely.
+
+### Consumer-owned scheduling
+
+The separation of responsibilities is intentional:
+
+- Signals own mutable values.
+- Memos cache derived values.
+- Effects perform side effects.
+- Subscriptions receive explicit notifications.
+- Scopes own resources and scope-local pending work.
+- Scope events notify consumers about invalidation and pending work.
+- Consumers decide when scopes run and flush.
+
+The crate does not require a particular event loop, task executor, or UI rendering strategy.
+
+## Integrating with an async runtime
+
+An async application can use scope notifications to decide when to wake a task or schedule work on an executor. The signals crate does not need to spawn tasks or depend on a specific async runtime.
+
+Conceptually, an adapter can:
+
+1. Subscribe to scope events.
+2. Translate invalidation or pending-work notifications into a wake-up or queued application task.
+3. Call `run()` when the scope result needs reevaluation.
+4. Call `flush()` when the scope has pending reactive work.
+5. Coalesce redundant wake-ups and avoid reentrant processing.
+
+The adapter owns the async scheduling policy. The signals crate owns reactive state, dependency tracking, invalidation, and scope-local pending work.
+
+A consumer should not assume that every signal write directly wakes an async task, or that a scope is automatically rerun or flushed without consumer action.
 
 ## Batching
 
-`batch()` groups multiple writes into one scheduling interval.
+`batch()` groups writes into a single scheduling interval.
 
 ```rust
 batch(|| {
     first.set(10);
     second.set(20);
 });
-
-app.flush();
 ```
 
-Nested batches defer scheduling until the outermost batch completes. Multiple writes can therefore invalidate dependents without executing queued work between every write.
+Nested batches defer the release of batched work until the outermost batch completes. This prevents reactive work from being processed between every write in a group.
 
-Batching does not change the initial-execution behavior of newly created effects. It also does not require a dirty memo to recompute until a read needs its result.
+Batching does not imply that the consumer must flush immediately. Pending work remains subject to the scope's scheduling policy.
 
-The scheduler must deduplicate pending work and define how invalidations propagate through chains of memos and effects.
+The runtime must define how batched invalidations propagate through memo chains and how redundant pending work is deduplicated.
 
-## Runtime architecture
+## Disposal and subscriptions
 
-The implementation should keep the following responsibilities distinct.
+A subscription can be explicitly removed by consuming its handle:
 
-### Signal storage
+```rust
+let subscription = count.subscribe(|value| {
+    println!("{value}");
+});
 
-Owns signal values and supports tracked reads, untracked reads, writes, invalidation, and subscriptions.
+subscription.unsubscribe();
+```
 
-### Execution context
+The runtime must consistently define resource lifetimes and disposal behavior, including:
 
-Maintains the active scope, memo, or effect context. It manages nested execution and dependency tracking.
+- Removing obsolete dependency registrations.
+- Preventing disposed effects from executing.
+- Preventing queued notifications from invoking disposed subscriptions.
+- Preventing stale handles from accessing recycled resource slots.
+- Cleaning up resources no longer retained by an execution.
+- Avoiding ownership cycles.
 
-### Scope runtime
+Dropping a subscription handle does not necessarily unsubscribe unless that behavior is explicitly implemented and documented. Call `unsubscribe()` when explicit removal is required.
 
-Stores the scope closure, cached resources, positional resource cursor, dependency registrations, and execution state.
+## Runtime safety and errors
 
-### Memo runtime
+The runtime must preserve internal consistency when execution fails. Important cases include:
 
-Stores the memo computation, cached result, dirty state, dependencies, comparison policy, and downstream subscribers. Reading a dirty memo evaluates its computation and updates its cache.
-
-### Effect runtime
-
-Stores effect closures, dependencies, dirty and queued state, and lifecycle information.
-
-### Dependency graph
-
-Tracks relationships between signals, memos, effects, scopes, and explicit subscribers. It removes obsolete dependency edges when computations rerun or resources are disposed.
-
-### Scheduler
-
-Queues invalidated effects and notification callbacks, deduplicates pending work, and processes queued work through `Scope::flush()`.
-
-The scheduler and memo runtime must cooperate so a dependent does not consume a stale memo result.
-
-### Shared read interface
-
-`Signal<T>` and `Memo<T>` should implement a common read-only trait for operations that are genuinely shared. The trait should express tracked reads, untracked reads, and, where practical, the copy-based convenience methods.
-
-Mutation operations remain specific to `Signal<T>`. The trait should not force a memo to expose operations that have no valid meaning for derived state.
-
-The precise trait shape depends on the final read return types and storage model. In particular, returning `&T` from interior-mutable storage requires a sound lifetime strategy; the implementation must not return references that outlive a temporary borrow.
-
-### Disposal
-
-Deactivates resources, removes dependency registrations, prevents disposed work from executing, and ensures stale handles cannot access disposed or recycled resources.
-
-## Disposal and ownership
-
-Resource ownership is distinct from the lifetime of a Rust handle referring to a resource.
-
-The runtime must define and consistently implement:
-
-- Scope and nested-resource ownership.
-- Effect and subscription lifetimes.
-- Disposal of a dependent without disposing its sources.
-- Disposal of a source with active dependents.
-- Disposal while work is queued.
-- Cleanup of resources no longer used by an execution.
-- Stale handles and resource-slot reuse.
-
-Disposal should be idempotent. Queued work belonging to disposed resources must not execute.
-
-Ownership relationships must avoid reference cycles. `Rc`/`Weak` or centrally managed resource identifiers may be appropriate for a single-threaded runtime, depending on the implementation.
-
-A disposed scope must not silently resume normal resource creation, and an old handle must not access a different resource merely because that resource reused the same slot.
-
-## Error handling and runtime safety
-
-The runtime must define behavior for:
-
-- Panics during scope, memo, effect, subscription, and update-closure execution.
-- Nested or reentrant flush requests.
+- Panics in scope, memo, effect, subscription, or update closures.
+- Nested or reentrant `run()` and `flush()` calls.
 - Reactive cycles and work-limit exhaustion.
-- `RefCell` borrow conflicts.
-- Disposal during a flush.
-- Resource kind, type, and count mismatches.
-- Stale resource handles.
-- Partial execution failures and dependency cleanup.
-- Memo computations that repeatedly invalidate their own dependency chain.
-- A failed memo recomputation and its cached result.
-- A panic during dependency replacement.
-- A panic while processing queued work.
+- Borrow conflicts.
+- Disposal while work is queued.
+- Resource kind or type mismatches.
+- Failed memo recomputation or dependency replacement.
 
-A failure must not leave the runtime's active context, scheduler state, dependency graph, or stored values in an invalid state.
-
-The runtime must define whether failed computations retain their last successful result, how they become eligible for retry, and how pending notifications are handled. A partially completed execution must not silently be treated as successful.
-
-## Implementation plan
-
-The implementation should proceed in phases so the reactive contract can be tested before adding more complex safety mechanisms.
-
-### Phase 1: Core storage and execution context
-
-- Implement signal storage and stable signal handles.
-- Implement tracked and untracked reads.
-- Implement writes and invalidation.
-- Implement active execution contexts and dependency registration.
-- Establish resource ownership and positional resource reuse.
-- Add focused tests for signal reads, writes, and dependency isolation.
-
-### Phase 2: Lazy memos
-
-- Implement `Memo<T>` creation and positional reuse.
-- Make initial evaluation lazy.
-- Implement cached results and dirty-state tracking.
-- Implement tracked and untracked memo reads.
-- Track and replace memo dependencies.
-- Define memo output change detection and downstream invalidation.
-- Test initial laziness, cached reads, invalidation, recomputation, and dynamic dependencies.
-
-### Phase 3: Effects
-
-- Implement immediate initial execution.
-- Implement dependency tracking and replacement on rerun.
-- Queue subsequent executions.
-- Deduplicate pending effect work.
-- Test conditional dependencies and deferred execution.
-
-### Phase 4: Scopes
-
-- Implement deferred scope creation and explicit `run()`.
-- Implement positional resource reuse and resource-cursor reset.
-- Implement scope dependency tracking and reevaluation notification.
-- Test repeated runs, stable resource identity, and invalid resource ordering.
-
-### Phase 5: Scheduler and batching
-
-- Implement queueing and deduplication.
-- Implement nested batching.
-- Define ordering between invalidation, memo reads, effect execution, and subscription notifications.
-- Test chained memos, multiple writes, nested batches, and work queued during a flush.
-
-### Phase 6: Subscriptions and disposal
-
-- Implement subscription creation and unsubscription.
-- Define callback timing and repeated-write behavior.
-- Implement resource cleanup and disposal.
-- Test disposal with queued work and stale handles.
-
-### Phase 7: Integration and behavior tests
-
-- Verify the public API against the documented examples.
-- Test the interactions between signals, memos, effects, scopes, and batching.
-- Test dynamic dependency replacement and lazy memo recomputation.
-- Check that ordinary reads and untracked reads have consistent semantics.
-- Verify that the runtime preserves resource identity across scope runs.
-
-### Phase 8: Panic guards
-
-Implement panic-safety guards **after the core runtime is working**.
-
-Use RAII guards to restore runtime state when unwinding through a panic. Areas to cover include:
-
-- Active execution-context restoration.
-- Scheduler and flush state.
-- Signal update ownership transfer.
-- Memo recomputation and cache commit.
-- Dependency replacement.
-- Scope execution state and resource cursors.
-- Temporary borrows and ownership transfer.
-- Queued work and disposal state.
-
-Do not indiscriminately catch and suppress panics. The objective is to leave the runtime in a valid, recoverable state while allowing the original panic to propagate unless the API explicitly defines a different policy.
-
-Add panic-injection tests to verify that a panic does not corrupt storage, leave a context active, lose dependencies, or prevent later independent work from executing.
-
-### Phase 9: Public API and documentation review
-
-- Finalize the common read-only trait for `Signal<T>` and `Memo<T>`.
-- Verify that mutation methods are exposed only on signals.
-- Review the lifetime and ownership semantics of reference-returning reads.
-- Confirm the lazy evaluation contract and scheduler ordering.
-- Ensure examples reflect tracked and untracked behavior.
-- Update this README whenever implementation semantics change.
+Panic guards and recovery behavior will be implemented after the core runtime works. The goal is to restore internal state during unwinding and allow the original panic to propagate unless the API explicitly specifies otherwise.
 
 ## Design principles
 
-1. **Explicit reactivity.** Tracked reads establish dependencies; untracked reads do not.
-2. **Lazy derived values.** Memos cache results and recompute when a dirty value is read.
-3. **Stable resource identity.** Repeated scope executions reuse resources at corresponding positions.
-4. **Separated responsibilities.** Signals own mutable state, memos derive values, effects perform side effects, and scopes manage persistent execution.
-5. **Deterministic scheduling.** State mutation and queued reactive execution remain separate operations.
-6. **Renderer independence.** The crate has no dependency on a particular UI framework or rendering backend.
-7. **Panic-safe runtime state.** Failures must not leave the reactive graph or execution context corrupted.
+1. **Consumer-owned scheduling:** the crate does not dictate when scopes execute.
+2. **Scope-local work:** flushing a scope processes that scope's pending reactive work.
+3. **Queued notifications:** callbacks are delivered as pending work rather than invoked immediately during invalidation.
+4. **Work deduplication:** each pending work item has a stable identity and is queued at most once at a time.
+5. **Explicit invalidation:** a stale scope result is reevaluated only when the consumer calls `run()`.
+6. **Lazy derived values:** memos cache results and recompute when a dirty result is read.
+7. **Observable memos:** memos are read-only but support subscriptions that are notified when their outputs change.
+8. **Explicit dependency tracking:** tracked reads register dependencies; untracked reads do not.
+9. **Persistent resource identity:** resources are reused across scope runs at corresponding positions.
+10. **Runtime independence:** no dependency on a particular UI framework, event loop, or async executor.
+11. **Deterministic processing:** notification coalescing, reentrancy, and work processing follow a defined contract.
+12. **Panic-safe state:** failures must not leave the reactive graph or leave execution context corrupted.

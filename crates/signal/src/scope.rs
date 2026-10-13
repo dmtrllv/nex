@@ -1,4 +1,4 @@
-use crate::{Subscription, subscription};
+use crate::Subscription;
 
 #[allow(unused)]
 pub struct Scope<T> {
