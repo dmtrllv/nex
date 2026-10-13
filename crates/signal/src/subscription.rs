@@ -1,17 +1,31 @@
-/// A handle to an active signal subscription.
+use std::{cell::Cell, rc::Rc};
+
+/// A handle to an active subscription.
 ///
-/// Dropping this value does not necessarily unsubscribe automatically;
-/// call [`unsubscribe`](Self::unsubscribe) to explicitly remove the
-/// subscription.
-pub struct Subscription;
+/// Dropping this value does not unsubscribe. Call
+/// [`unsubscribe`](Self::unsubscribe) to deactivate the subscription.
+pub struct Subscription {
+    active: Rc<Cell<bool>>,
+}
 
 impl Subscription {
-    /// Removes the subscription so its callback no longer receives change
-    /// notifications.
-    ///
-    /// Consumes the handle to prevent the same subscription from being
-    /// explicitly unsubscribed through it more than once.
+    pub(crate) fn create() -> (Self, Rc<Cell<bool>>) {
+        let active = Rc::new(Cell::new(true));
+
+        (
+            Self {
+                active: Rc::clone(&active),
+            },
+            active,
+        )
+    }
+
+    /// Removes the subscription so it no longer receives notifications.
     pub fn unsubscribe(self) {
-        todo!()
+        self.active.set(false);
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.active.get()
     }
 }
