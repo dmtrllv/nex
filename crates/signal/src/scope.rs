@@ -9,6 +9,12 @@ use crate::{
     runtime::{self, ObserverGuard, ObserverNode, ScopeEventState},
 };
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResourceKind {
+    Signal,
+    Memo,
+}
+
 enum Slot {
     Signal {
         type_id: TypeId,
@@ -42,37 +48,53 @@ impl ResourceStore {
         }
     }
 
-    fn get_or_insert<T: 'static>(&mut self, create: impl FnOnce() -> T) -> Rc<T> {
+    fn get_or_insert<T: 'static>(
+        &mut self,
+        kind: ResourceKind,
+        create: impl FnOnce() -> T,
+    ) -> Rc<T> {
         let index = self.cursor;
         self.cursor += 1;
 
         if index < self.resources.len() {
-            match &self.resources[index] {
-                Slot::Signal { type_id, value } => {
-                    assert_eq!(
-                        *type_id,
-                        TypeId::of::<T>(),
-                        "resource type changed at slot {index}",
-                    );
+            let slot = &self.resources[index];
 
-                    return Rc::clone(
-                        value
-                            .downcast_ref::<Rc<T>>()
-                            .expect("resource slot type metadata is inconsistent"),
-                    );
-                }
-                Slot::Memo { .. } => {
+            let (type_id, value) = match (kind, slot) {
+                (ResourceKind::Signal, Slot::Signal { type_id, value })
+                | (ResourceKind::Memo, Slot::Memo { type_id, value }) => (type_id, value),
+                (ResourceKind::Signal, Slot::Memo { .. })
+                | (ResourceKind::Memo, Slot::Signal { .. }) => {
                     panic!("resource kind changed at slot {index}");
                 }
-            }
+            };
+
+            assert_eq!(
+                *type_id,
+                TypeId::of::<T>(),
+                "resource type changed at slot {index}",
+            );
+
+            return Rc::clone(
+                value
+                    .downcast_ref::<Rc<T>>()
+                    .expect("resource slot type metadata is inconsistent"),
+            );
         }
 
         let value = Rc::new(create());
 
-        self.resources.push(Slot::Signal {
-            type_id: TypeId::of::<T>(),
-            value: Box::new(Rc::clone(&value)),
-        });
+        let slot = match kind {
+            ResourceKind::Signal => Slot::Signal {
+                type_id: TypeId::of::<T>(),
+                value: Box::new(Rc::clone(&value)),
+            },
+            ResourceKind::Memo => Slot::Memo {
+                type_id: TypeId::of::<T>(),
+                value: Box::new(Rc::clone(&value)),
+            },
+        };
+
+        self.resources.push(slot);
 
         value
     }
@@ -117,8 +139,8 @@ impl Drop for ActiveScopeGuard {
 
 /// Retrieves a signal resource from the active scope, creating it if needed.
 ///
-/// Resource identity is positional: the resource at the current cursor is
-/// reused when its stored type matches `T`.
+/// Resource identity is positional. The resource at the current cursor is
+/// reused only when its kind and concrete type match.
 pub(crate) fn signal_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState>) -> T) -> Rc<T> {
     let store = ACTIVE_SCOPE.with(|active| {
         active
@@ -130,7 +152,29 @@ pub(crate) fn signal_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState
 
     let events = Rc::clone(&store.borrow().events);
 
-    store.borrow_mut().get_or_insert(|| create(events))
+    store
+        .borrow_mut()
+        .get_or_insert(ResourceKind::Signal, || create(events))
+}
+
+/// Retrieves a memo resource from the active scope, creating it if needed.
+///
+/// Resource identity is positional. The resource at the current cursor is
+/// reused only when its kind and concrete type match.
+pub(crate) fn memo_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState>) -> T) -> Rc<T> {
+    let store = ACTIVE_SCOPE.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .cloned()
+            .expect("memos must be created inside an active scope")
+    });
+
+    let events = Rc::clone(&store.borrow().events);
+
+    store
+        .borrow_mut()
+        .get_or_insert(ResourceKind::Memo, || create(events))
 }
 
 impl<T> Scope<T> {
