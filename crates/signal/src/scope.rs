@@ -491,7 +491,6 @@ pub fn scope<T>(closure: impl Fn() -> T + 'static) -> Scope<T> {
         subscribers: Vec::new(),
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
