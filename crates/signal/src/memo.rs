@@ -1,12 +1,16 @@
+
 use std::{
-    cell::{Cell, Ref, RefCell},
+    cell::{Cell, RefCell},
+    fmt::Debug,
+    marker::PhantomData,
+    ops::Deref,
     rc::Rc,
 };
 
 use crate::{
     Subscription,
     runtime::{self, ObserverGuard, ObserverNode, ScopeEventState, SourceNode},
-    scope::memo_resource,
+    scope::{ResourceId, ResourceKind, memo_resource, resolve_resource},
 };
 
 struct MemoSubscriber<T> {
@@ -17,38 +21,99 @@ struct MemoSubscriber<T> {
 
 struct MemoInner<T> {
     compute: RefCell<Box<dyn Fn() -> T>>,
-    value: RefCell<Option<T>>,
+    value: RefCell<Option<Rc<T>>>,
     source: Rc<SourceNode>,
     observer: Rc<ObserverNode>,
     events: Rc<ScopeEventState>,
     subscribers: RefCell<Vec<MemoSubscriber<T>>>,
 }
 
-/// A lazily evaluated, cached reactive computation.
-#[derive(Clone)]
+/// An owned snapshot of a memo's cached value.
+pub struct MemoReadGuard<T> {
+    value: Rc<T>,
+}
+
+impl<T> Deref for MemoReadGuard<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        self.value.as_ref()
+    }
+}
+
+impl<T> Clone for MemoReadGuard<T> {
+    fn clone(&self) -> Self {
+        Self {
+            value: Rc::clone(&self.value),
+        }
+    }
+}
+
+/// A lightweight handle to a lazily evaluated, cached reactive computation.
 pub struct Memo<T: PartialEq + 'static> {
-    inner: Rc<MemoInner<T>>,
+    id: ResourceId,
+    marker: PhantomData<fn() -> T>,
+}
+
+impl<T: PartialEq + 'static> Copy for Memo<T> {}
+
+impl<T: PartialEq + 'static> Clone for Memo<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: PartialEq + 'static> PartialEq for Memo<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl<T: PartialEq + 'static> Eq for Memo<T> {}
+
+impl<T: PartialEq + 'static> std::hash::Hash for Memo<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
 }
 
 impl<T: PartialEq + 'static> Memo<T> {
+    fn inner(&self) -> Rc<MemoInner<T>> {
+        resolve_resource(self.id, ResourceKind::Memo)
+    }
+
     /// Lazily evaluates the memo and tracks the active observer as a
     /// dependent of its cached value.
-    pub fn get(&self) -> Ref<'_, T> {
-        ensure_value(&self.inner);
-        runtime::track(&self.inner.source);
+    pub fn get(&self) -> MemoReadGuard<T> {
+        let inner = self.inner();
 
-        Ref::map(self.inner.value.borrow(), |value| {
-            value.as_ref().expect("memo value should be initialized")
-        })
+        ensure_value(&inner);
+        runtime::track(&inner.source);
+
+        let value = inner
+            .value
+            .borrow()
+            .as_ref()
+            .expect("memo value should be initialized")
+            .clone();
+
+        MemoReadGuard { value }
     }
 
     /// Lazily evaluates the memo without tracking a dependency.
-    pub fn inspect(&self) -> Ref<'_, T> {
-        ensure_value(&self.inner);
+    pub fn inspect(&self) -> MemoReadGuard<T> {
+        let inner = self.inner();
 
-        Ref::map(self.inner.value.borrow(), |value| {
-            value.as_ref().expect("memo value should be initialized")
-        })
+        ensure_value(&inner);
+
+        let value = inner
+            .value
+            .borrow()
+            .as_ref()
+            .expect("memo value should be initialized")
+            .clone();
+
+        MemoReadGuard { value }
     }
 
     /// Subscribes to changes in this memo.
@@ -56,9 +121,10 @@ impl<T: PartialEq + 'static> Memo<T> {
     /// Notifications are deferred until queued work is processed.
     /// The initial evaluation does not produce a notification.
     pub fn subscribe(&self, closure: impl Fn(&T) + 'static) -> Subscription {
+        let inner = self.inner();
         let (subscription, active) = Subscription::create();
 
-        self.inner.subscribers.borrow_mut().push(MemoSubscriber {
+        inner.subscribers.borrow_mut().push(MemoSubscriber {
             active,
             pending: Rc::new(Cell::new(false)),
             callback: Rc::new(closure),
@@ -80,11 +146,19 @@ impl<T: Copy + PartialEq + 'static> Memo<T> {
     }
 }
 
+impl<T: Debug + PartialEq + 'static> Debug for Memo<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Memo")
+            .field(self.inspect().deref())
+            .finish()
+    }
+}
+
 /// Creates or retrieves a memo resource in the active scope.
 pub fn memo<T: PartialEq + 'static>(closure: impl Fn() -> T + 'static) -> Memo<T> {
     let mut compute: Option<Box<dyn Fn() -> T>> = Some(Box::new(closure));
 
-    let inner = memo_resource(|events| MemoInner {
+    let id = memo_resource(|events| MemoInner {
         compute: RefCell::new(
             compute
                 .take()
@@ -97,22 +171,31 @@ pub fn memo<T: PartialEq + 'static>(closure: impl Fn() -> T + 'static) -> Memo<T
         subscribers: RefCell::new(Vec::new()),
     });
 
-    // When the resource already existed, its creation closure was not called.
-    // Replace the old computation with the closure from this scope run.
+    let handle = Memo {
+        id,
+        marker: PhantomData,
+    };
+
+    let inner = handle.inner();
+
+    // If the resource already existed, its creation closure was not called.
+    // Update its computation to use the closure from the latest scope run.
     if let Some(compute) = compute {
         *inner.compute.borrow_mut() = compute;
         inner.observer.mark_invalidated();
     }
 
-    // The scheduled callback holds only a weak reference, so it cannot
-    // keep the memo alive after its owning resources are released.
+    // Scheduled work holds only a weak reference. The scope remains the
+    // owner of the memo resource.
     let weak_inner = Rc::downgrade(&inner);
+
     inner.observer.set_schedule(Rc::new(move || {
         let Some(inner) = weak_inner.upgrade() else {
             return;
         };
 
         let weak_inner = Rc::downgrade(&inner);
+
         inner.events.queue_work(move || {
             let Some(inner) = weak_inner.upgrade() else {
                 return;
@@ -122,9 +205,10 @@ pub fn memo<T: PartialEq + 'static>(closure: impl Fn() -> T + 'static) -> Memo<T
         });
     }));
 
+    // Creating a memo inside a scope establishes a dependency on its source.
     runtime::track(&inner.source);
 
-    Memo { inner }
+    handle
 }
 
 fn queue_notifications<T: PartialEq + 'static>(inner: &Rc<MemoInner<T>>) {
@@ -150,10 +234,10 @@ fn queue_notifications<T: PartialEq + 'static>(inner: &Rc<MemoInner<T>>) {
             continue;
         }
 
-        let inner = Rc::clone(inner);
-        let weak_inner = Rc::downgrade(&inner);
+        let weak_inner = Rc::downgrade(inner);
+        let events = Rc::clone(&inner.events);
 
-        inner.events.queue_work(move || {
+        events.queue_work(move || {
             pending.set(false);
 
             if !active.get() {
@@ -164,13 +248,18 @@ fn queue_notifications<T: PartialEq + 'static>(inner: &Rc<MemoInner<T>>) {
                 return;
             };
 
-            // A memo can be invalidated again before this notification runs.
+            // The memo may have been invalidated again before this
+            // notification runs. Ensure the callback sees the latest value.
             ensure_value(&inner);
 
-            let value = inner.value.borrow();
-            let value = value.as_ref().expect("memo value should be initialized");
+            let value = inner
+                .value
+                .borrow()
+                .as_ref()
+                .expect("memo value should be initialized")
+                .clone();
 
-            callback(value);
+            callback(value.as_ref());
         });
     }
 }
@@ -185,9 +274,8 @@ fn ensure_value<T: PartialEq + 'static>(inner: &Rc<MemoInner<T>>) -> bool {
 
     runtime::clear_dependencies(&inner.observer);
 
-    // Mark valid before evaluation. If the computation causes one of its
-    // dependencies to change while running, invalidation can mark it dirty
-    // again and schedule another pass.
+    // Mark valid before evaluation. If a dependency changes during evaluation,
+    // invalidation can mark the memo dirty again and schedule another pass.
     inner.observer.mark_valid();
 
     let next = {
@@ -199,13 +287,13 @@ fn ensure_value<T: PartialEq + 'static>(inner: &Rc<MemoInner<T>>) -> bool {
         let mut cached = inner.value.borrow_mut();
 
         match cached.as_ref() {
-            Some(previous) if previous == &next => false,
+            Some(previous) if previous.as_ref() == &next => false,
             Some(_) => {
-                *cached = Some(next);
+                *cached = Some(Rc::new(next));
                 true
             }
             None => {
-                *cached = Some(next);
+                *cached = Some(Rc::new(next));
                 false
             }
         }
@@ -231,17 +319,16 @@ mod tests {
 
         let mut app = crate::scope::scope(move || {
             let source = crate::signal::signal(1);
-            *handle.borrow_mut() = Some(source.clone());
+            *handle.borrow_mut() = Some(source);
 
-            let input = source.clone();
+            let input = source;
             let derived = memo(move || input.value() % 2);
 
             (source, derived)
         });
 
-        let (_, derived) = app.run().clone();
+        let (_, derived) = *app.run();
 
-        // Initialize the lazy memo before subscribing.
         assert_eq!(derived.value(), 1);
 
         let received = Rc::new(RefCell::new(Vec::new()));
@@ -251,13 +338,11 @@ mod tests {
             callback_received.borrow_mut().push(*value);
         });
 
-        // 1 -> 3 leaves the computed value unchanged.
         signal_handle.borrow().as_ref().unwrap().set(3);
         app.flush();
 
         assert!(received.borrow().is_empty());
 
-        // 3 -> 4 changes the computed value from 1 to 0.
         signal_handle.borrow().as_ref().unwrap().set(4);
         app.flush();
 
@@ -273,28 +358,29 @@ mod tests {
 
         let mut app = crate::scope::scope(move || {
             let source = crate::signal::signal(1);
-            *handle.borrow_mut() = Some(source.clone());
+            *handle.borrow_mut() = Some(source);
 
-            let input = source.clone();
-            let cc = computation_count.clone();
+            let input = source;
+            let cc = Rc::clone(&computation_count);
+
             memo(move || {
                 cc.set(cc.get() + 1);
                 input.value() * 2
             })
         });
 
-        let derived = app.run().clone();
+        let derived = *app.run();
+
         assert_eq!(derived.value(), 2);
         assert_eq!(computations.get(), 1);
 
         signal_handle.borrow().as_ref().unwrap().set(2);
 
-        // This read recomputes immediately, before app.flush().
         assert_eq!(derived.value(), 4);
         assert_eq!(computations.get(), 2);
 
-        // The previously queued recomputation must now be a no-op.
         app.flush();
+
         assert_eq!(derived.value(), 4);
         assert_eq!(computations.get(), 2);
     }
@@ -306,15 +392,13 @@ mod tests {
 
         let mut app = crate::scope::scope(move || {
             let source = crate::signal::signal(1);
-            *handle.borrow_mut() = Some(source.clone());
+            *handle.borrow_mut() = Some(source);
 
-            let input = source.clone();
+            let input = source;
             memo(move || input.value() * 2)
         });
 
-        let derived = app.run().clone();
-
-        // Initialize the lazy memo before subscribing.
+        let derived = *app.run();
         assert_eq!(derived.value(), 2);
 
         let calls = Rc::new(Cell::new(0));
@@ -329,7 +413,6 @@ mod tests {
 
         subscription.unsubscribe();
 
-        // No additional calls after unsubscription.
         signal_handle.borrow().as_ref().unwrap().set(3);
         app.flush();
 
@@ -347,30 +430,62 @@ mod tests {
             let trigger = crate::signal::signal(0);
             let source = crate::signal::signal(10);
 
-            *handle.borrow_mut() = Some(trigger.clone());
+            *handle.borrow_mut() = Some(trigger);
 
-            // This dependency causes the scope to execute again.
             let _ = trigger.value();
 
-            // Capture the current non-reactive value in the memo closure.
             let factor = current_multiplier.get();
-            let input = source.clone();
+            let input = source;
 
             memo(move || input.value() * factor)
         });
 
-        let derived = app.run().clone();
+        let derived = *app.run();
         assert_eq!(derived.value(), 20);
 
-        // Change the captured value, then invalidate the scope.
         multiplier.set(3);
         trigger_handle.borrow().as_ref().unwrap().set(1);
 
-        // The scope rerun must update the existing memo's closure.
-        let reused = app.run().clone();
-        assert_eq!(reused.value(), 30);
+        let reused = *app.run();
 
-        // The memo resource itself must have been reused.
-        assert!(Rc::ptr_eq(&derived.inner, &reused.inner));
+        assert_eq!(reused.value(), 30);
+        assert_eq!(derived, reused);
+    }
+
+    #[test]
+    fn memo_handle_is_copy_without_t_copy() {
+		#[derive(PartialEq)]
+        struct NonCopy(String);
+
+        let mut app = crate::scope::scope(|| {
+            memo(|| NonCopy(String::from("value")))
+        });
+
+        let first = *app.run();
+        let second = first;
+
+        assert_eq!(first.inspect().0, "value");
+        assert_eq!(second.inspect().0, "value");
+    }
+
+    #[test]
+    fn memo_read_guard_keeps_old_snapshot_after_recomputation() {
+        let source_handle = Rc::new(RefCell::new(None));
+        let handle = Rc::clone(&source_handle);
+
+        let mut app = crate::scope::scope(move || {
+            let source = crate::signal::signal(1);
+            *handle.borrow_mut() = Some(source);
+
+            let input = source;
+            memo(move || format!("value-{}", input.value()))
+        });
+
+        let derived = *app.run();
+        let old_snapshot = derived.get();
+
+        source_handle.borrow().as_ref().unwrap().set(2);
+        assert_eq!(&*derived.get(), "value-2");
+        assert_eq!(&*old_snapshot, "value-1");
     }
 }

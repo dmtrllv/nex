@@ -1,3 +1,4 @@
+
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -5,7 +6,7 @@ use std::{
 
 use crate::{
     runtime::{self, ObserverGuard, ObserverNode, ScopeEventState},
-    scope::effect_resource,
+    scope::{ResourceId, ResourceKind, effect_resource, resolve_resource},
 };
 
 struct EffectInner {
@@ -22,7 +23,7 @@ struct EffectInner {
 pub fn effect(closure: impl Fn() + 'static) {
     let mut compute: Option<Box<dyn Fn()>> = Some(Box::new(closure));
 
-    let (_id, inner) = effect_resource(|events| EffectInner {
+    let id: ResourceId = effect_resource(|events| EffectInner {
         compute: RefCell::new(
             compute
                 .take()
@@ -33,11 +34,16 @@ pub fn effect(closure: impl Fn() + 'static) {
         scheduled: Cell::new(false),
     });
 
-    // Refresh the closure when this resource is reused by a scope rerun.
+    let inner: Rc<EffectInner> = resolve_resource(id, ResourceKind::Effect);
+
+    // If the resource already existed, refresh its closure to use captures
+    // from the latest scope execution.
     if let Some(compute) = compute {
         *inner.compute.borrow_mut() = compute;
     }
 
+    // The observer's scheduler holds only a weak reference. The scope remains
+    // the owner of the effect resource.
     let weak_inner = Rc::downgrade(&inner);
 
     inner.observer.set_schedule(Rc::new(move || {
@@ -48,8 +54,8 @@ pub fn effect(closure: impl Fn() + 'static) {
         schedule_effect(&inner);
     }));
 
-    // Schedule initial execution too. The scheduled flag coalesces this
-    // with any invalidation that occurs before the effect first runs.
+    // Schedule initial execution too. The scheduled flag coalesces this with
+    // invalidations that occur before the effect first runs.
     schedule_effect(&inner);
 }
 
@@ -108,9 +114,9 @@ mod tests {
 
         let mut app = crate::scope::scope(move || {
             let source = crate::signal::signal(1);
-            *handle.borrow_mut() = Some(source.clone());
+            *handle.borrow_mut() = Some(source);
 
-            let source_for_effect = source.clone();
+            let source_for_effect = source;
             let values_for_effect = Rc::clone(&effect_values);
 
             effect(move || {
@@ -122,6 +128,7 @@ mod tests {
 
         app.run();
         app.flush();
+
         assert_eq!(*values.borrow(), vec![1]);
 
         source_handle.borrow().as_ref().unwrap().set(2);
@@ -130,6 +137,7 @@ mod tests {
         assert_eq!(*values.borrow(), vec![1]);
 
         app.flush();
+
         assert_eq!(*values.borrow(), vec![1, 2]);
     }
 
@@ -142,9 +150,9 @@ mod tests {
 
         let mut app = crate::scope::scope(move || {
             let source = crate::signal::signal(0);
-            *handle.borrow_mut() = Some(source.clone());
+            *handle.borrow_mut() = Some(source);
 
-            let source_for_effect = source.clone();
+            let source_for_effect = source;
             let values_for_effect = Rc::clone(&effect_values);
 
             effect(move || {
@@ -156,9 +164,10 @@ mod tests {
 
         app.run();
         app.flush();
+
         assert_eq!(*values.borrow(), vec![0]);
 
-        let source = source_handle.borrow().as_ref().unwrap().clone();
+        let source = *source_handle.borrow().as_ref().unwrap();
         source.set(1);
         source.set(2);
         source.set(3);
@@ -167,5 +176,77 @@ mod tests {
 
         // One rerun observes the latest value.
         assert_eq!(*values.borrow(), vec![0, 3]);
+    }
+
+    #[test]
+    fn reused_effect_uses_closure_from_latest_scope_run() {
+        let trigger_handle = Rc::new(RefCell::new(None));
+        let handle = Rc::clone(&trigger_handle);
+        let multiplier = Rc::new(Cell::new(2));
+        let current_multiplier = Rc::clone(&multiplier);
+        let results = Rc::new(RefCell::new(Vec::new()));
+        let effect_results = Rc::clone(&results);
+
+        let mut app = crate::scope::scope(move || {
+            let trigger = crate::signal::signal(0);
+            *handle.borrow_mut() = Some(trigger);
+
+            // This dependency causes the scope to rerun.
+            let _ = trigger.value();
+
+            let factor = current_multiplier.get();
+            let results = Rc::clone(&effect_results);
+
+            effect(move || {
+                results.borrow_mut().push(factor);
+            });
+        });
+
+        app.run();
+        app.flush();
+
+        assert_eq!(*results.borrow(), vec![2]);
+
+        multiplier.set(3);
+        trigger_handle.borrow().as_ref().unwrap().set(1);
+
+        app.run();
+        app.flush();
+
+        // The existing effect resource uses the latest captured factor.
+        assert_eq!(*results.borrow(), vec![2, 3]);
+    }
+
+    #[test]
+    fn repeated_scope_runs_do_not_duplicate_initial_effect_work() {
+        let trigger_handle = Rc::new(RefCell::new(None));
+        let handle = Rc::clone(&trigger_handle);
+        let calls = Rc::new(Cell::new(0));
+        let effect_calls = Rc::clone(&calls);
+
+        let mut app = crate::scope::scope(move || {
+            let trigger = crate::signal::signal(0);
+            *handle.borrow_mut() = Some(trigger);
+
+            let _ = trigger.value();
+
+            let calls = Rc::clone(&effect_calls);
+            effect(move || {
+                calls.set(calls.get() + 1);
+            });
+        });
+
+        app.run();
+        app.run();
+
+        app.flush();
+        assert_eq!(calls.get(), 1);
+
+        trigger_handle.borrow().as_ref().unwrap().set(1);
+
+        app.run();
+        app.flush();
+
+        assert_eq!(calls.get(), 2);
     }
 }

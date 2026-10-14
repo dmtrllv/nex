@@ -6,22 +6,17 @@ pub fn example_1() {
         let price = signal(25.0);
         let quantity = signal(2);
 
-        let p = price.clone();
-        let q = quantity.clone();
+        let total = memo(move || price.value() * quantity.value() as f64);
 
-        let total = memo(move || p.value() * q.value() as f64);
-
-        let p = price.clone();
         effect(move || {
-            println!("Price: €{:.2}", p.value());
+            println!("Price: €{:.2}", price.value());
         });
 
         effect(move || {
             println!("Cart total: €{:.2}", total.value());
         });
 
-        let p = price.clone();
-        println!("Inspecting price: €{:.2}", p.inspect());
+        println!("Inspecting price: €{:.2}", price.inspect());
 
         (price, quantity)
     });

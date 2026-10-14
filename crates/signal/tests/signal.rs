@@ -3,17 +3,16 @@ use signal::{scope, signal};
 #[test]
 fn signal_stores_and_updates_its_value() {
     let mut app = scope(|| signal(10));
-
     let count = app.run();
 
-    assert_eq!(count.value(), 10);
+    assert_eq!(*count.get(), 10);
 
     count.set(20);
-    assert_eq!(count.value(), 20);
+    assert_eq!(*count.get(), 20);
 
-    let updated = count.update(|value| value + 5);
+    let updated = count.update(|value| *value += 5);
     assert_eq!(*updated, 25);
-    assert_eq!(count.value(), 25);
+    assert_eq!(*count.get(), 25);
 }
 
 #[test]
@@ -27,10 +26,8 @@ fn signal_stores_and_reads_its_value() {
     let mut app = scope(|| signal(10));
     let count = app.run();
 
-    assert_eq!(count.value(), 10);
     assert_eq!(*count.get(), 10);
     assert_eq!(*count.inspect(), 10);
-    assert_eq!(count.inspect_value(), 10);
 }
 
 #[test]
@@ -40,18 +37,18 @@ fn set_replaces_the_value() {
 
     count.set(20);
 
-    assert_eq!(count.value(), 20);
+    assert_eq!(*count.get(), 20);
 }
 
 #[test]
-fn update_replaces_the_value_and_returns_a_reference() {
+fn update_mutates_the_value_and_returns_a_read_guard() {
     let mut app = scope(|| signal(10));
     let count = app.run();
 
-    let updated = count.update(|value| value + 5);
+    let updated = count.update(|value| *value += 5);
 
     assert_eq!(*updated, 15);
-    assert_eq!(count.value(), 15);
+    assert_eq!(*count.inspect(), 15);
 }
 
 #[test]
@@ -68,9 +65,8 @@ fn update_works_without_clone() {
 
     let state = app.run();
 
-    let updated = state.update(|mut current| {
+    let updated = state.update(|current| {
         current.value.push_str(" world");
-        current
     });
 
     assert_eq!(updated.value, "hello world");
@@ -78,25 +74,24 @@ fn update_works_without_clone() {
 }
 
 #[test]
-fn update_can_consume_the_current_value() {
+fn update_can_mutate_a_non_clone_value_in_place() {
     struct NonClone(String);
 
     let mut app = scope(|| signal(NonClone(String::from("before"))));
     let state = app.run();
 
     state.update(|current| {
-        let NonClone(value) = current;
-        NonClone(format!("{value}-after"))
+        current.0.push_str("-after");
     });
 
     assert_eq!(state.inspect().0, "before-after");
 }
 
 #[test]
-fn tracked_signal_write_invalidates_scope() {
+fn tracked_signal_read_invalidates_scope_after_write() {
     let mut app = scope(|| {
         let count = signal(1);
-        let observed = count.value();
+        let observed = *count.get();
 
         (count, observed)
     });
@@ -114,7 +109,7 @@ fn tracked_signal_write_invalidates_scope() {
 fn update_invalidates_scope() {
     let mut app = scope(|| {
         let count = signal(1);
-        let observed = count.value();
+        let observed = *count.get();
 
         (count, observed)
     });
@@ -122,14 +117,14 @@ fn update_invalidates_scope() {
     let (count, observed) = app.run();
     assert_eq!(*observed, 1);
 
-    count.update(|value| value + 1);
+    count.update(|value| *value += 1);
 
     let (_, observed) = app.run();
     assert_eq!(*observed, 2);
 }
 
 #[test]
-fn untracked_read_does_not_invalidate_scope() {
+fn untracked_read_does_not_create_a_dependency() {
     use std::cell::Cell;
     use std::rc::Rc;
 
@@ -140,7 +135,7 @@ fn untracked_read_does_not_invalidate_scope() {
         executions_for_scope.set(executions_for_scope.get() + 1);
 
         let count = signal(1);
-        let observed = count.inspect_value();
+        let observed = *count.inspect();
 
         (count, observed)
     });
@@ -151,9 +146,9 @@ fn untracked_read_does_not_invalidate_scope() {
 
     count.set(2);
 
+    // Explicitly rerunning the scope recomputes its result.
     let (_, observed) = app.run();
 
-    // The untracked read created no dependency, so the cached result remains.
     assert_eq!(*observed, 2);
     assert_eq!(executions.get(), 2);
 }

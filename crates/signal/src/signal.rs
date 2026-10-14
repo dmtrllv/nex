@@ -1,11 +1,6 @@
 
 use std::{
-    any::Any,
-    cell::{Cell, RefCell},
-    fmt::Debug,
-    marker::PhantomData,
-    ops::Deref,
-    rc::Rc,
+    any::Any, cell::{Cell, RefCell}, fmt::{Debug, Display}, marker::PhantomData, ops::Deref, rc::Rc,
 };
 
 use crate::{
@@ -48,6 +43,18 @@ impl<T> Clone for SignalReadGuard<T> {
             value: Rc::clone(&self.value),
         }
     }
+}
+
+impl<T: Debug> Debug for SignalReadGuard<T> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("SignalReadGuard").field("value", &self.value).finish()
+	}
+}
+
+impl<T: Debug> Display for SignalReadGuard<T> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("SignalReadGuard").field("value", &self.value).finish()
+	}
 }
 
 /// A lightweight handle to a reactive value.
