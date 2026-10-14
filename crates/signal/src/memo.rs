@@ -1,20 +1,19 @@
 use std::{
-    cell::{Ref, RefCell},
+    cell::{Cell, Ref, RefCell},
     rc::Rc,
 };
 
 use crate::{
+    Subscription,
     runtime::{self, ObserverGuard, ObserverNode, ScopeEventState, SourceNode},
     scope::memo_resource,
-    Subscription,
 };
 
-// NOTE:
-// One important caveat
-// This is the first implementation layer, not the final memo implementation. 
-// It establishes the evaluation path and connects invalidation to queued work. 
-// The next step must add memo subscriptions and tests, then check edge cases 
-// such as a memo being read after invalidation but before its queued work runs.
+struct MemoSubscriber<T> {
+    active: Rc<Cell<bool>>,
+    pending: Rc<Cell<bool>>,
+    callback: Rc<dyn Fn(&T)>,
+}
 
 struct MemoInner<T> {
     compute: RefCell<Box<dyn Fn() -> T>>,
@@ -22,9 +21,11 @@ struct MemoInner<T> {
     source: Rc<SourceNode>,
     observer: Rc<ObserverNode>,
     events: Rc<ScopeEventState>,
+    subscribers: RefCell<Vec<MemoSubscriber<T>>>,
 }
 
 /// A lazily evaluated, cached reactive computation.
+#[derive(Clone)]
 pub struct Memo<T: PartialEq + 'static> {
     inner: Rc<MemoInner<T>>,
 }
@@ -52,9 +53,18 @@ impl<T: PartialEq + 'static> Memo<T> {
 
     /// Subscribes to changes in this memo.
     ///
-    /// Notifications will be queued when the memo's computed value changes.
-    pub fn subscribe(&self, _closure: impl Fn(&T) + 'static) -> Subscription {
-        todo!("implement memo subscriptions in the next step")
+    /// Notifications are deferred until queued work is processed.
+    /// The initial evaluation does not produce a notification.
+    pub fn subscribe(&self, closure: impl Fn(&T) + 'static) -> Subscription {
+        let (subscription, active) = Subscription::create();
+
+        self.inner.subscribers.borrow_mut().push(MemoSubscriber {
+            active,
+            pending: Rc::new(Cell::new(false)),
+            callback: Rc::new(closure),
+        });
+
+        subscription
     }
 }
 
@@ -78,6 +88,7 @@ pub fn memo<T: PartialEq + 'static>(closure: impl Fn() -> T + 'static) -> Memo<T
         source: SourceNode::new(),
         observer: ObserverNode::new(),
         events,
+        subscribers: RefCell::new(Vec::new()),
     });
 
     // The scheduled callback holds only a weak reference, so it cannot
@@ -99,6 +110,54 @@ pub fn memo<T: PartialEq + 'static>(closure: impl Fn() -> T + 'static) -> Memo<T
     }));
 
     Memo { inner }
+}
+
+fn queue_notifications<T: PartialEq + 'static>(inner: &Rc<MemoInner<T>>) {
+    let subscribers: Vec<_> = {
+        let mut subscribers = inner.subscribers.borrow_mut();
+
+        subscribers.retain(|subscriber| subscriber.active.get());
+
+        subscribers
+            .iter()
+            .map(|subscriber| {
+                (
+                    Rc::clone(&subscriber.active),
+                    Rc::clone(&subscriber.pending),
+                    Rc::clone(&subscriber.callback),
+                )
+            })
+            .collect()
+    };
+
+    for (active, pending, callback) in subscribers {
+        if pending.replace(true) {
+            continue;
+        }
+
+        let inner = Rc::clone(inner);
+        let weak_inner = Rc::downgrade(&inner);
+
+        inner.events.queue_work(move || {
+            pending.set(false);
+
+            if !active.get() {
+                return;
+            }
+
+            let Some(inner) = weak_inner.upgrade() else {
+                return;
+            };
+
+            // A memo can be invalidated again before this notification runs.
+            ensure_value(&inner);
+
+            let value = inner.value.borrow();
+            let value = value.as_ref().expect("memo value should be initialized");
+
+            callback(value);
+        });
+    }
 }
 
 /// Ensures the memo has a current cached value.
@@ -139,7 +198,126 @@ fn ensure_value<T: PartialEq + 'static>(inner: &Rc<MemoInner<T>>) -> bool {
 
     if changed {
         runtime::invalidate(&inner.source);
+        queue_notifications(inner);
     }
 
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    #[test]
+    fn memo_subscription_notifies_only_when_value_changes() {
+        let signal_handle = Rc::new(RefCell::new(None));
+        let handle = Rc::clone(&signal_handle);
+
+        let mut app = crate::scope::scope(move || {
+            let source = crate::signal::signal(1);
+            *handle.borrow_mut() = Some(source.clone());
+
+            let input = source.clone();
+            let derived = memo(move || input.value() % 2);
+
+            (source, derived)
+        });
+
+        let (_, derived) = app.run().clone();
+
+        // Initialize the lazy memo before subscribing.
+        assert_eq!(derived.value(), 1);
+
+        let received = Rc::new(RefCell::new(Vec::new()));
+        let callback_received = Rc::clone(&received);
+
+        let _subscription = derived.subscribe(move |value| {
+            callback_received.borrow_mut().push(*value);
+        });
+
+        // 1 -> 3 leaves the computed value unchanged.
+        signal_handle.borrow().as_ref().unwrap().set(3);
+        app.flush();
+
+        assert!(received.borrow().is_empty());
+
+        // 3 -> 4 changes the computed value from 1 to 0.
+        signal_handle.borrow().as_ref().unwrap().set(4);
+        app.flush();
+
+        assert_eq!(*received.borrow(), vec![0]);
+    }
+
+    #[test]
+    fn reading_invalidated_memo_before_flush_recomputes_once() {
+        let signal_handle = Rc::new(RefCell::new(None));
+        let handle = Rc::clone(&signal_handle);
+        let computations = Rc::new(Cell::new(0));
+        let computation_count = Rc::clone(&computations);
+
+        let mut app = crate::scope::scope(move || {
+            let source = crate::signal::signal(1);
+            *handle.borrow_mut() = Some(source.clone());
+
+            let input = source.clone();
+            let cc = computation_count.clone();
+            memo(move || {
+                cc.set(cc.get() + 1);
+                input.value() * 2
+            })
+        });
+
+        let derived = app.run().clone();
+        assert_eq!(derived.value(), 2);
+        assert_eq!(computations.get(), 1);
+
+        signal_handle.borrow().as_ref().unwrap().set(2);
+
+        // This read recomputes immediately, before app.flush().
+        assert_eq!(derived.value(), 4);
+        assert_eq!(computations.get(), 2);
+
+        // The previously queued recomputation must now be a no-op.
+        app.flush();
+        assert_eq!(derived.value(), 4);
+        assert_eq!(computations.get(), 2);
+    }
+
+    #[test]
+    fn memo_subscription_can_be_unsubscribed_before_delivery() {
+        let signal_handle = Rc::new(RefCell::new(None));
+        let handle = Rc::clone(&signal_handle);
+
+        let mut app = crate::scope::scope(move || {
+            let source = crate::signal::signal(1);
+            *handle.borrow_mut() = Some(source.clone());
+
+            let input = source.clone();
+            memo(move || input.value() * 2)
+        });
+
+        let derived = app.run().clone();
+
+        // Initialize the lazy memo before subscribing.
+        assert_eq!(derived.value(), 2);
+
+        let calls = Rc::new(Cell::new(0));
+        let callback_calls = Rc::clone(&calls);
+
+        let subscription = derived.subscribe(move |_| {
+            callback_calls.set(callback_calls.get() + 1);
+        });
+
+        signal_handle.borrow().as_ref().unwrap().set(2);
+        app.flush();
+
+        subscription.unsubscribe();
+
+        // No additional calls after unsubscription.
+        signal_handle.borrow().as_ref().unwrap().set(3);
+        app.flush();
+
+        assert_eq!(calls.get(), 1);
+    }
 }
