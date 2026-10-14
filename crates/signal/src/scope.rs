@@ -1,16 +1,30 @@
-use std::{
-    any::{Any, TypeId},
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
-
 use crate::{
     Subscription,
     runtime::{self, ObserverGuard, ObserverNode, ScopeEventState},
 };
+use std::{
+    any::{Any, TypeId},
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    rc::{Rc, Weak},
+    sync::atomic::{AtomicUsize, Ordering},
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ResourceId {
+    pub(crate) scope: usize,
+    pub(crate) index: usize,
+    pub(crate) generation: usize,
+}
+
+static NEXT_SCOPE_ID: AtomicUsize = AtomicUsize::new(1);
+
+fn next_scope_id() -> usize {
+    NEXT_SCOPE_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum ResourceKind {
+pub(crate) enum ResourceKind {
     Signal,
     Memo,
     Effect,
@@ -39,17 +53,23 @@ struct ScopeSubscriber<T> {
 }
 
 struct ResourceStore {
+    id: usize,
     resources: Vec<Slot>,
     cursor: usize,
     events: Rc<ScopeEventState>,
+    // Generations survive truncation so a reused slot cannot validate
+    // a handle belonging to the previous resource.
+    generations: Vec<usize>,
 }
 
 impl ResourceStore {
-    fn new(events: Rc<ScopeEventState>) -> Self {
+    fn new(id: usize, events: Rc<ScopeEventState>) -> Self {
         Self {
+            id,
             resources: Vec::new(),
             cursor: 0,
             events,
+            generations: Vec::new(),
         }
     }
 
@@ -57,7 +77,7 @@ impl ResourceStore {
         &mut self,
         kind: ResourceKind,
         create: impl FnOnce() -> T,
-    ) -> Rc<T> {
+    ) -> ResourceId {
         let index = self.cursor;
         self.cursor += 1;
 
@@ -66,11 +86,11 @@ impl ResourceStore {
 
             let (type_id, value) = match (kind, slot) {
                 (ResourceKind::Signal, Slot::Signal { type_id, value })
-                | (ResourceKind::Effect, Slot::Effect { type_id, value })
-                | (ResourceKind::Memo, Slot::Memo { type_id, value }) => (type_id, value),
-                _ => {
-                    panic!("resource kind changed at slot {index}");
+                | (ResourceKind::Memo, Slot::Memo { type_id, value })
+                | (ResourceKind::Effect, Slot::Effect { type_id, value }) => {
+                    (type_id, value)
                 }
+                _ => panic!("resource kind changed at slot {index}"),
             };
 
             assert_eq!(
@@ -79,34 +99,142 @@ impl ResourceStore {
                 "resource type changed at slot {index}",
             );
 
-            return Rc::clone(
-                value
-                    .downcast_ref::<Rc<T>>()
-                    .expect("resource slot type metadata is inconsistent"),
+            assert!(
+                value.downcast_ref::<Rc<T>>().is_some(),
+                "resource slot type metadata is inconsistent",
             );
+
+            return ResourceId {
+                scope: self.id,
+                index,
+                generation: *self
+                    .generations
+                    .get(index)
+                    .expect("resource slot has no generation"),
+            };
         }
 
+        let id = self.next_resource_id(index);
         let value = Rc::new(create());
 
         let slot = match kind {
             ResourceKind::Signal => Slot::Signal {
                 type_id: TypeId::of::<T>(),
-                value: Box::new(Rc::clone(&value)),
+                value: Box::new(value),
             },
             ResourceKind::Memo => Slot::Memo {
                 type_id: TypeId::of::<T>(),
-                value: Box::new(Rc::clone(&value)),
+                value: Box::new(value),
             },
             ResourceKind::Effect => Slot::Effect {
                 type_id: TypeId::of::<T>(),
-                value: Box::new(Rc::clone(&value)),
+                value: Box::new(value),
             },
         };
 
         self.resources.push(slot);
 
-        value
+        id
     }
+
+    fn get<T: 'static>(&self, id: ResourceId, kind: ResourceKind) -> Rc<T> {
+        assert_eq!(
+            id.scope, self.id,
+            "resource belongs to a different scope",
+        );
+
+        let slot = self
+            .resources
+            .get(id.index)
+            .unwrap_or_else(|| panic!("resource slot {} no longer exists", id.index));
+
+        let current_generation = *self
+            .generations
+            .get(id.index)
+            .expect("resource slot has no generation");
+
+        assert_eq!(
+            id.generation,
+            current_generation,
+            "stale resource handle at slot {}",
+            id.index,
+        );
+
+        let (type_id, value) = match (kind, slot) {
+            (ResourceKind::Signal, Slot::Signal { type_id, value })
+            | (ResourceKind::Memo, Slot::Memo { type_id, value })
+            | (ResourceKind::Effect, Slot::Effect { type_id, value }) => {
+                (type_id, value)
+            }
+            _ => panic!("resource kind mismatch at slot {}", id.index),
+        };
+
+        assert_eq!(
+            *type_id,
+            TypeId::of::<T>(),
+            "resource type mismatch at slot {}",
+            id.index,
+        );
+
+        Rc::clone(
+            value
+                .downcast_ref::<Rc<T>>()
+                .expect("resource slot type metadata is inconsistent"),
+        )
+    }
+
+    fn next_resource_id(&mut self, index: usize) -> ResourceId {
+        if index == self.generations.len() {
+            self.generations.push(1);
+        } else if index < self.generations.len() {
+            self.generations[index] = self.generations[index]
+                .checked_add(1)
+                .expect("resource generation overflow");
+        } else {
+            panic!("resource generations are not contiguous");
+        }
+
+        ResourceId {
+            scope: self.id,
+            index,
+            generation: self.generations[index],
+        }
+    }
+}
+
+thread_local! {
+    static SCOPE_REGISTRY: RefCell<HashMap<usize, Weak<RefCell<ResourceStore>>>> =
+        RefCell::new(HashMap::new());
+}
+
+fn register_scope(id: usize, resources: &Rc<RefCell<ResourceStore>>) {
+    SCOPE_REGISTRY.with(|registry| {
+        registry.borrow_mut().insert(id, Rc::downgrade(resources));
+    });
+}
+
+fn resolve_scope(id: usize) -> Rc<RefCell<ResourceStore>> {
+    SCOPE_REGISTRY.with(|registry| {
+        registry
+            .borrow()
+            .get(&id)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| panic!("scope {id} no longer exists"))
+    })
+}
+
+/// Resolves a resource ID to a temporary strong reference.
+///
+/// Public signal and memo handles should store only `ResourceId`, not this
+/// returned `Rc`. The scope's resource store remains the resource owner.
+pub(crate) fn resolve_resource<T: 'static>(
+    id: ResourceId,
+    kind: ResourceKind,
+) -> Rc<T> {
+    let resources = resolve_scope(id.scope);
+    let store = resources.borrow();
+
+    store.get(id, kind)
 }
 
 struct FlushGuard(Rc<Cell<bool>>);
@@ -121,7 +249,6 @@ pub struct Scope<T> {
     closure: Box<dyn Fn() -> T>,
     resources: Rc<RefCell<ResourceStore>>,
     result: Option<T>,
-    //work_queue: VecDeque<Work>,
     observer: Rc<ObserverNode>,
     events: Rc<ScopeEventState>,
     flushing: Rc<Cell<bool>>,
@@ -143,7 +270,6 @@ impl<T> Scope<T> {
         let _guard = FlushGuard(Rc::clone(&self.flushing));
 
         loop {
-            // Announce pending work before executing it.
             if self.events.has_work() {
                 if let Some(event) = self.events.pop_pending() {
                     self.dispatch_event(event);
@@ -156,10 +282,8 @@ impl<T> Scope<T> {
                 }
             }
 
-            // No queued work remains, so the current work cycle is complete.
             self.events.finish_work_cycle();
 
-            // With no work waiting, dispatch any remaining scope events.
             if let Some(event) = self.events.pop() {
                 self.dispatch_event(event);
                 continue;
@@ -278,7 +402,9 @@ impl Drop for ActiveScopeGuard {
 ///
 /// Resource identity is positional. The resource at the current cursor is
 /// reused only when its kind and concrete type match.
-pub(crate) fn signal_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState>) -> T) -> Rc<T> {
+pub(crate) fn signal_resource<T: 'static>(
+    create: impl FnOnce(Rc<ScopeEventState>) -> T,
+) -> ResourceId {
     let store = ACTIVE_SCOPE.with(|active| {
         active
             .borrow()
@@ -298,7 +424,9 @@ pub(crate) fn signal_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState
 ///
 /// Resource identity is positional. The resource at the current cursor is
 /// reused only when its kind and concrete type match.
-pub(crate) fn memo_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState>) -> T) -> Rc<T> {
+pub(crate) fn memo_resource<T: 'static>(
+    create: impl FnOnce(Rc<ScopeEventState>) -> T,
+) -> ResourceId {
     let store = ACTIVE_SCOPE.with(|active| {
         active
             .borrow()
@@ -318,7 +446,9 @@ pub(crate) fn memo_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState>)
 ///
 /// Resource identity is positional. The resource at the current cursor is
 /// reused only when its kind and concrete type match.
-pub(crate) fn effect_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState>) -> T) -> Rc<T> {
+pub(crate) fn effect_resource<T: 'static>(
+    create: impl FnOnce(Rc<ScopeEventState>) -> T,
+) -> ResourceId {
     let store = ACTIVE_SCOPE.with(|active| {
         active
             .borrow()
@@ -341,12 +471,19 @@ pub enum ScopeEvent {
 }
 
 pub fn scope<T>(closure: impl Fn() -> T + 'static) -> Scope<T> {
+    let id = next_scope_id();
     let events = Rc::new(ScopeEventState::default());
     let observer = ObserverNode::new_for_scope(&events);
+    let resources = Rc::new(RefCell::new(ResourceStore::new(
+        id,
+        Rc::clone(&events),
+    )));
+
+    register_scope(id, &resources);
 
     Scope {
         closure: Box::new(closure),
-        resources: Rc::new(RefCell::new(ResourceStore::new(Rc::clone(&events)))),
+        resources,
         result: None,
         observer,
         events,
@@ -410,18 +547,15 @@ mod tests {
         assert_eq!(*scope.run(), 0);
         assert_eq!(executions.get(), 1);
 
-        // A valid scope returns its cached result.
         assert_eq!(*scope.run(), 0);
         assert_eq!(executions.get(), 1);
 
-        // Updating the tracked signal invalidates the scope.
         count_handle.borrow().as_ref().unwrap().set(1);
 
         assert!(scope.observer.is_invalidated());
         assert_eq!(*scope.run(), 1);
         assert_eq!(executions.get(), 2);
 
-        // The new result is cached too.
         assert_eq!(*scope.run(), 1);
         assert_eq!(executions.get(), 2);
     }
@@ -538,7 +672,10 @@ mod tests {
 
         let mut scope = Scope {
             closure: Box::new(|| ()),
-            resources: Rc::new(RefCell::new(ResourceStore::new(Rc::clone(&events)))),
+            resources: Rc::new(RefCell::new(ResourceStore::new(
+                next_scope_id(),
+                Rc::clone(&events),
+            ))),
             result: None,
             observer: ObserverNode::new_for_scope(&events),
             events: Rc::clone(&events),
@@ -610,11 +747,8 @@ mod tests {
 
         signal_handle.borrow().as_ref().unwrap().set(1);
 
-        // The write queues events; it does not synchronously invoke
-        // the scope subscription.
         assert_eq!(invalidations.get(), 0);
 
-        // run() is a processing boundary and dispatches the queued event.
         assert_eq!(app.run().value(), 1);
         assert_eq!(invalidations.get(), 1);
     }
@@ -650,7 +784,6 @@ mod tests {
         let mut app = scope(move || {
             let count = signal(0);
 
-            // The scope directly depends on this signal.
             let _ = count.value();
 
             let effect_count = count.clone();
@@ -666,7 +799,6 @@ mod tests {
 
         app.run();
 
-        // Process the effect's initial execution.
         app.flush();
         assert_eq!(*effect_values.borrow(), vec![0]);
 
@@ -701,8 +833,10 @@ mod tests {
         let mut app = scope(move || {
             let count = signal(0);
             let _ = count.value();
+
             let effect_value_for_closure = effect_value_for_closure.clone();
             let effect_count = count.clone();
+
             effect(move || {
                 effect_value_for_closure.set(effect_count.value());
             });
@@ -740,7 +874,10 @@ mod tests {
         let events = Rc::new(ScopeEventState::default());
         let mut app = Scope {
             closure: Box::new(|| ()),
-            resources: Rc::new(RefCell::new(ResourceStore::new(Rc::clone(&events)))),
+            resources: Rc::new(RefCell::new(ResourceStore::new(
+                next_scope_id(),
+                Rc::clone(&events),
+            ))),
             result: None,
             observer: ObserverNode::new_for_scope(&events),
             events: Rc::clone(&events),

@@ -22,7 +22,7 @@ struct EffectInner {
 pub fn effect(closure: impl Fn() + 'static) {
     let mut compute: Option<Box<dyn Fn()>> = Some(Box::new(closure));
 
-    let inner = effect_resource(|events| EffectInner {
+    let (_id, inner) = effect_resource(|events| EffectInner {
         compute: RefCell::new(
             compute
                 .take()
