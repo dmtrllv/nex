@@ -131,12 +131,16 @@ impl ScopeEventState {
         Some(event)
     }
 
-    pub(crate) fn queue_work(&self, work: impl FnOnce() + 'static) {
+    pub(crate) fn queue_work(self: &Rc<Self>, work: impl FnOnce() + 'static) {
         self.work_queue.borrow_mut().push_back(Box::new(work));
 
         // Emit Pending only when work transitions from absent to present.
         if !self.work_pending.replace(true) {
-            self.queue_pending();
+            if is_batching() {
+                defer_pending(self);
+            } else {
+                self.queue_pending();
+            }
         }
     }
 
@@ -174,6 +178,55 @@ impl ScopeEventState {
 }
 
 type Work = Box<dyn FnOnce()>;
+
+thread_local! {
+    static BATCH_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static DEFERRED_PENDING: RefCell<Vec<Weak<ScopeEventState>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn is_batching() -> bool {
+    BATCH_DEPTH.with(|depth| depth.get() > 0)
+}
+
+pub(crate) fn begin_batch() {
+    BATCH_DEPTH.with(|depth| depth.set(depth.get() + 1));
+}
+
+pub(crate) fn end_batch() {
+    let outermost = BATCH_DEPTH.with(|depth| {
+        let next = depth.get().checked_sub(1).expect("batch depth underflow");
+        depth.set(next);
+        next == 0
+    });
+
+    if !outermost {
+        return;
+    }
+
+    let deferred = DEFERRED_PENDING.with(|pending| std::mem::take(&mut *pending.borrow_mut()));
+
+    for events in deferred.into_iter().filter_map(|events| events.upgrade()) {
+        if events.has_work() {
+            events.queue_pending();
+        }
+    }
+}
+
+fn defer_pending(events: &Rc<ScopeEventState>) {
+    DEFERRED_PENDING.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        pending.retain(|entry| entry.strong_count() > 0);
+
+        if !pending
+            .iter()
+            .filter_map(Weak::upgrade)
+            .any(|existing| Rc::ptr_eq(&existing, events))
+        {
+            pending.push(Rc::downgrade(events));
+        }
+    });
+}
 
 /// Registers the active observer as a dependent of `source`.
 pub(crate) fn track(source: &Rc<SourceNode>) {
@@ -387,7 +440,7 @@ mod tests {
 
     #[test]
     fn queued_work_is_not_executed_immediately() {
-        let events = ScopeEventState::default();
+        let events = Rc::new(ScopeEventState::default());
         let calls = Rc::new(Cell::new(0));
         let calls_by_work = Rc::clone(&calls);
 
@@ -408,7 +461,7 @@ mod tests {
 
     #[test]
     fn queued_work_is_retrieved_in_fifo_order() {
-        let events = ScopeEventState::default();
+        let events = Rc::new(ScopeEventState::default());
         let order = Rc::new(RefCell::new(Vec::new()));
 
         for value in [1, 2, 3] {
@@ -456,8 +509,8 @@ mod tests {
 
     #[test]
     fn scopes_have_independent_work_queues() {
-        let first = ScopeEventState::default();
-        let second = ScopeEventState::default();
+        let first = Rc::new(ScopeEventState::default());
+        let second = Rc::new(ScopeEventState::default());
         let calls = Rc::new(Cell::new(0));
         let calls_by_work = Rc::clone(&calls);
 
