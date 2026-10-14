@@ -8,7 +8,8 @@ Implementation order:
 	✔ 7	flush()	Processes pending work and newly queued work correctly. @done(26-10-14 03:40)
 	✔ 8	Batching - Defers eligible work until the outermost batch completes. @done(26-10-14 03:40)
 	✔ 9	Lifecycle and edge-case tests - Validates disposal, reentrancy, and resource reuse. @done(26-10-14 03:48)
-	☐ 10 Review lifecycle and failure handling (see below)
+	☐ 10 Make the Signal non owning - This elminiates all .clone() noise 
+	☐ 11 Review lifecycle and failure handling (see below)
 	☐ 12 Audit batching and work-cycle semantics (Add regression tests for any gaps found during this review.)
 	☐ 13 Finalize the core implementation documentation
 	☐ 14 Implement multithreading support
