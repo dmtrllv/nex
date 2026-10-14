@@ -13,6 +13,7 @@ use crate::{
 enum ResourceKind {
     Signal,
     Memo,
+    Effect,
 }
 
 enum Slot {
@@ -21,6 +22,10 @@ enum Slot {
         value: Box<dyn Any>,
     },
     Memo {
+        type_id: TypeId,
+        value: Box<dyn Any>,
+    },
+    Effect {
         type_id: TypeId,
         value: Box<dyn Any>,
     },
@@ -61,9 +66,9 @@ impl ResourceStore {
 
             let (type_id, value) = match (kind, slot) {
                 (ResourceKind::Signal, Slot::Signal { type_id, value })
+                | (ResourceKind::Effect, Slot::Effect { type_id, value })
                 | (ResourceKind::Memo, Slot::Memo { type_id, value }) => (type_id, value),
-                (ResourceKind::Signal, Slot::Memo { .. })
-                | (ResourceKind::Memo, Slot::Signal { .. }) => {
+                _ => {
                     panic!("resource kind changed at slot {index}");
                 }
             };
@@ -89,6 +94,10 @@ impl ResourceStore {
                 value: Box::new(Rc::clone(&value)),
             },
             ResourceKind::Memo => Slot::Memo {
+                type_id: TypeId::of::<T>(),
+                value: Box::new(Rc::clone(&value)),
+            },
+            ResourceKind::Effect => Slot::Effect {
                 type_id: TypeId::of::<T>(),
                 value: Box::new(Rc::clone(&value)),
             },
@@ -184,6 +193,26 @@ pub(crate) fn memo_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState>)
     store
         .borrow_mut()
         .get_or_insert(ResourceKind::Memo, || create(events))
+}
+
+/// Retrieves an effect resource from the active scope, creating it if needed.
+///
+/// Resource identity is positional. The resource at the current cursor is
+/// reused only when its kind and concrete type match.
+pub(crate) fn effect_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState>) -> T) -> Rc<T> {
+    let store = ACTIVE_SCOPE.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .cloned()
+            .expect("effects must be created inside an active scope")
+    });
+
+    let events = Rc::clone(&store.borrow().events);
+
+    store
+        .borrow_mut()
+        .get_or_insert(ResourceKind::Effect, || create(events))
 }
 
 impl<T> Scope<T> {

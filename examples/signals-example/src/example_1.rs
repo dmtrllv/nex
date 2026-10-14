@@ -16,7 +16,7 @@ pub fn example_1() {
             println!("Price: €{:.2}", p.value());
         });
 
-        effect(|| {
+        effect(move || {
             println!("Cart total: €{:.2}", total.value());
         });
 
@@ -28,6 +28,7 @@ pub fn example_1() {
 
     let _subscription = app.subscribe(|app, event| match event {
         ScopeEvent::Invalidated => {
+			println!("Got invalidated scope");
             let (price, quantity) = app.run();
 
             println!("--- Read current state ---");
@@ -35,6 +36,7 @@ pub fn example_1() {
             println!("Quantity: {}", quantity.get());
         }
         ScopeEvent::Pending => {
+			println!("Got pending tasks");
             app.flush();
         }
     });

@@ -107,7 +107,7 @@ pub fn memo<T: PartialEq + 'static>(closure: impl Fn() -> T + 'static) -> Memo<T
     // The scheduled callback holds only a weak reference, so it cannot
     // keep the memo alive after its owning resources are released.
     let weak_inner = Rc::downgrade(&inner);
-    inner.observer.set_memo_schedule(Rc::new(move || {
+    inner.observer.set_schedule(Rc::new(move || {
         let Some(inner) = weak_inner.upgrade() else {
             return;
         };
