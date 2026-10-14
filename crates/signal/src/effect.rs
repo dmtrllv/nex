@@ -75,7 +75,6 @@ fn schedule_effect(inner: &Rc<EffectInner>) {
     });
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

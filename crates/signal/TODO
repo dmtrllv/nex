@@ -7,4 +7,18 @@ Implementation order:
 	✔ 6	Effects	Adds reactive side effects and queued execution. @done(26-10-14 02:38)
 	✔ 7	flush()	Processes pending work and newly queued work correctly. @done(26-10-14 03:40)
 	✔ 8	Batching - Defers eligible work until the outermost batch completes. @done(26-10-14 03:40)
-	☐ 9	Lifecycle and edge-case tests - Validates disposal, reentrancy, and resource reuse.
+	✔ 9	Lifecycle and edge-case tests - Validates disposal, reentrancy, and resource reuse. @done(26-10-14 03:48)
+	☐ 10 Review lifecycle and failure handling (see below)
+	☐ 12 Audit batching and work-cycle semantics (Add regression tests for any gaps found during this review.)
+	☐ 13 Finalize the core implementation documentation
+	☐ 14 Implement multithreading support
+
+Review:
+	☐ Resource cleanup when a scope no longer uses a resource.
+	☐ Effect disposal and cancellation of queued work.
+	☐ Whether memo disposal is needed.
+	☐ Panic safety and RAII guards.
+	☐ Circular computation detection and recovery behavior.
+	☐ Reentrant calls to flush() and event callbacks.
+	☐ Whether stale work can execute after a resource is replaced or disposed.
+

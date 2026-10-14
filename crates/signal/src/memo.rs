@@ -122,7 +122,7 @@ pub fn memo<T: PartialEq + 'static>(closure: impl Fn() -> T + 'static) -> Memo<T
         });
     }));
 
-	runtime::track(&inner.source);
+    runtime::track(&inner.source);
 
     Memo { inner }
 }
