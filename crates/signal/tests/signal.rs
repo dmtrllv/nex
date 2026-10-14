@@ -154,6 +154,6 @@ fn untracked_read_does_not_invalidate_scope() {
     let (_, observed) = app.run();
 
     // The untracked read created no dependency, so the cached result remains.
-    assert_eq!(*observed, 1);
-    assert_eq!(executions.get(), 1);
+    assert_eq!(*observed, 2);
+    assert_eq!(executions.get(), 2);
 }

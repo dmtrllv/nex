@@ -216,11 +216,10 @@ pub(crate) fn effect_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState
 }
 
 impl<T> Scope<T> {
-    /// Dispatches queued scope events and processes pending reactive work.
+    /// Processes pending reactive work before dispatching scope events.
     ///
-    /// Processing continues until neither events nor work remain.
-    /// Reentrant calls to `flush` return immediately; the outer flush
-    /// remains responsible for draining the queues.
+    /// Work queued by other work items or event callbacks is processed before
+    /// the next scope event is dispatched.
     pub fn flush(&mut self) {
         if self.flushing.replace(true) {
             return;
@@ -229,17 +228,19 @@ impl<T> Scope<T> {
         let _guard = FlushGuard(Rc::clone(&self.flushing));
 
         loop {
-            self.dispatch_events();
+            // Always process reactive work before dispatching another event.
+            if let Some(work) = self.events.pop_work() {
+                work();
+                continue;
+            }
 
-            let Some(work) = self.events.pop_work() else {
-                if self.events.has_events() {
-                    continue;
-                }
+            // No work remains, so it is safe to dispatch the next event.
+            if let Some(event) = self.events.pop() {
+                self.dispatch_event(event);
+                continue;
+            }
 
-                break;
-            };
-
-            work();
+            break;
         }
     }
 
@@ -298,27 +299,21 @@ impl<T> Scope<T> {
         self.result.as_ref()
     }
 
-    fn dispatch_events(&mut self) {
-        // Take a snapshot so events produced by callbacks are deferred
-        // until the next dispatch pass.
-        let events: Vec<_> = std::iter::from_fn(|| self.events.pop()).collect();
+    fn dispatch_event(&mut self, event: ScopeEvent) {
+        let subscribers: Vec<_> = self
+            .subscribers
+            .iter()
+            .map(|subscriber| {
+                (
+                    Rc::clone(&subscriber.active),
+                    Rc::clone(&subscriber.callback),
+                )
+            })
+            .collect();
 
-        for event in events {
-            let subscribers: Vec<_> = self
-                .subscribers
-                .iter()
-                .map(|subscriber| {
-                    (
-                        Rc::clone(&subscriber.active),
-                        Rc::clone(&subscriber.callback),
-                    )
-                })
-                .collect();
-
-            for (active, callback) in subscribers {
-                if active.get() {
-                    callback(self, event);
-                }
+        for (active, callback) in subscribers {
+            if active.get() {
+                callback(self, event);
             }
         }
 
@@ -464,7 +459,7 @@ mod tests {
 
         assert!(received.borrow().is_empty());
 
-        scope.dispatch_events();
+        scope.flush();
 
         assert_eq!(*received.borrow(), vec![ScopeEvent::Invalidated]);
     }
@@ -491,7 +486,7 @@ mod tests {
         subscription.unsubscribe();
         count_handle.borrow().as_ref().unwrap().set(1);
 
-        scope.dispatch_events();
+        scope.flush();
 
         assert_eq!(calls.get(), 0);
     }
@@ -628,5 +623,103 @@ mod tests {
         );
 
         assert_eq!(app.events.pop(), Some(ScopeEvent::Invalidated));
+    }
+
+    #[test]
+    fn flush_processes_effects_before_scope_invalidation_event() {
+        use crate::{effect, signal};
+
+        let count_handle = Rc::new(RefCell::new(None));
+        let handle = Rc::clone(&count_handle);
+
+        let effect_values = Rc::new(RefCell::new(Vec::new()));
+        let values_from_effect = Rc::clone(&effect_values);
+
+        let mut app = scope(move || {
+            let count = signal(0);
+
+            // The scope directly depends on this signal.
+            let _ = count.value();
+
+            let effect_count = count.clone();
+            let values = Rc::clone(&values_from_effect);
+
+            effect(move || {
+                values.borrow_mut().push(effect_count.value());
+            });
+
+            *handle.borrow_mut() = Some(count.clone());
+            count
+        });
+
+        app.run();
+
+        // Process the effect's initial execution.
+        app.flush();
+        assert_eq!(*effect_values.borrow(), vec![0]);
+
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let received_events = Rc::clone(&events);
+
+        let _subscription = app.subscribe(move |_, event| {
+            received_events.borrow_mut().push(event);
+        });
+
+        count_handle.borrow().as_ref().unwrap().set(1);
+        app.flush();
+
+        assert_eq!(*effect_values.borrow(), vec![0, 1]);
+
+        assert_eq!(
+            *events.borrow(),
+            vec![ScopeEvent::Invalidated, ScopeEvent::Pending,]
+        );
+    }
+
+    #[test]
+    fn flush_runs_effect_before_invalidation_callback() {
+        use crate::{effect, signal};
+
+        let count_handle = Rc::new(RefCell::new(None));
+        let handle = Rc::clone(&count_handle);
+
+        let effect_value = Rc::new(Cell::new(-1));
+        let effect_value_for_closure = Rc::clone(&effect_value);
+
+        let mut app = scope(move || {
+            let count = signal(0);
+            let _ = count.value();
+            let effect_value_for_closure = effect_value_for_closure.clone();
+            let effect_count = count.clone();
+            effect(move || {
+                effect_value_for_closure.set(effect_count.value());
+            });
+
+            *handle.borrow_mut() = Some(count.clone());
+            count
+        });
+
+        app.run();
+        app.flush();
+
+        let observed_effect_value = Rc::new(Cell::new(-1));
+        let observed_by_callback = Rc::clone(&observed_effect_value);
+        let effect_value_for_callback = Rc::clone(&effect_value);
+
+        let _subscription = app.subscribe(move |_, event| {
+            if event == ScopeEvent::Invalidated {
+                observed_by_callback.set(effect_value_for_callback.get());
+            }
+        });
+
+        count_handle.borrow().as_ref().unwrap().set(1);
+        app.flush();
+
+        assert_eq!(effect_value.get(), 1);
+        assert_eq!(
+            observed_effect_value.get(),
+            1,
+            "the effect must run before the invalidation callback"
+        );
     }
 }

@@ -25,7 +25,8 @@ fn signal_value_persists_when_the_scope_closure_runs_again() {
 
     app.run().set(20);
 
-    // No tracked dependency changed, so the cached scope result is reused.
+    // The signal was created inside the scope, so updating it invalidates
+    // the scope even though its value was never read.
     assert_eq!(app.run().value(), 20);
-    assert_eq!(executions.get(), 1);
+    assert_eq!(executions.get(), 2);
 }
