@@ -104,6 +104,7 @@ pub(crate) struct ScopeEventState {
     invalidated_queued: Cell<bool>,
     pending_queued: Cell<bool>,
     work_queue: RefCell<VecDeque<Work>>,
+    work_pending: Cell<bool>,
 }
 
 impl ScopeEventState {
@@ -132,11 +133,43 @@ impl ScopeEventState {
 
     pub(crate) fn queue_work(&self, work: impl FnOnce() + 'static) {
         self.work_queue.borrow_mut().push_back(Box::new(work));
-        self.queue_pending();
+
+        // Emit Pending only when work transitions from absent to present.
+        if !self.work_pending.replace(true) {
+            self.queue_pending();
+        }
+    }
+
+    pub(crate) fn has_work(&self) -> bool {
+        !self.work_queue.borrow().is_empty()
+    }
+
+    /// Removes a queued Pending event even if another event was queued first.
+    ///
+    /// Used to notify the consumer about pending work before processing it.
+    pub(crate) fn pop_pending(&self) -> Option<ScopeEvent> {
+        let mut queue = self.queue.borrow_mut();
+        let index = queue
+            .iter()
+            .position(|event| *event == ScopeEvent::Pending)?;
+
+        let event = queue.remove(index);
+
+        if event.is_some() {
+            self.pending_queued.set(false);
+        }
+
+        event
     }
 
     pub(crate) fn pop_work(&self) -> Option<Work> {
-        self.work_queue.borrow_mut().pop_front()
+        let work = self.work_queue.borrow_mut().pop_front();
+
+        if work.is_some() && self.work_queue.borrow().is_empty() {
+            self.work_pending.set(false);
+        }
+
+        work
     }
 }
 

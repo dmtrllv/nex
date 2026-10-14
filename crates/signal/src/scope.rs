@@ -128,98 +128,14 @@ pub struct Scope<T> {
     subscribers: Vec<ScopeSubscriber<T>>,
 }
 
-thread_local! {
-    static ACTIVE_SCOPE: RefCell<Option<Rc<RefCell<ResourceStore>>>> =
-        const { RefCell::new(None) };
-}
-
-struct ActiveScopeGuard {
-    previous: Option<Rc<RefCell<ResourceStore>>>,
-}
-
-impl ActiveScopeGuard {
-    fn enter(resources: Rc<RefCell<ResourceStore>>) -> Self {
-        let previous = ACTIVE_SCOPE.with(|active| active.replace(Some(resources)));
-
-        Self { previous }
-    }
-}
-
-impl Drop for ActiveScopeGuard {
-    fn drop(&mut self) {
-        let previous = self.previous.take();
-
-        ACTIVE_SCOPE.with(|active| {
-            active.replace(previous);
-        });
-    }
-}
-
-/// Retrieves a signal resource from the active scope, creating it if needed.
-///
-/// Resource identity is positional. The resource at the current cursor is
-/// reused only when its kind and concrete type match.
-pub(crate) fn signal_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState>) -> T) -> Rc<T> {
-    let store = ACTIVE_SCOPE.with(|active| {
-        active
-            .borrow()
-            .as_ref()
-            .cloned()
-            .expect("signals must be created inside an active scope")
-    });
-
-    let events = Rc::clone(&store.borrow().events);
-
-    store
-        .borrow_mut()
-        .get_or_insert(ResourceKind::Signal, || create(events))
-}
-
-/// Retrieves a memo resource from the active scope, creating it if needed.
-///
-/// Resource identity is positional. The resource at the current cursor is
-/// reused only when its kind and concrete type match.
-pub(crate) fn memo_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState>) -> T) -> Rc<T> {
-    let store = ACTIVE_SCOPE.with(|active| {
-        active
-            .borrow()
-            .as_ref()
-            .cloned()
-            .expect("memos must be created inside an active scope")
-    });
-
-    let events = Rc::clone(&store.borrow().events);
-
-    store
-        .borrow_mut()
-        .get_or_insert(ResourceKind::Memo, || create(events))
-}
-
-/// Retrieves an effect resource from the active scope, creating it if needed.
-///
-/// Resource identity is positional. The resource at the current cursor is
-/// reused only when its kind and concrete type match.
-pub(crate) fn effect_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState>) -> T) -> Rc<T> {
-    let store = ACTIVE_SCOPE.with(|active| {
-        active
-            .borrow()
-            .as_ref()
-            .cloned()
-            .expect("effects must be created inside an active scope")
-    });
-
-    let events = Rc::clone(&store.borrow().events);
-
-    store
-        .borrow_mut()
-        .get_or_insert(ResourceKind::Effect, || create(events))
-}
 
 impl<T> Scope<T> {
-    /// Processes pending reactive work before dispatching scope events.
+    /// Processes pending scope events and reactive work.
     ///
-    /// Work queued by other work items or event callbacks is processed before
-    /// the next scope event is dispatched.
+    /// A Pending event is dispatched before the queued work it announces.
+    /// After the callback returns, this method processes the work before
+    /// dispatching other scope events. Work queued during processing is
+    /// handled by the same flush loop.
     pub fn flush(&mut self) {
         if self.flushing.replace(true) {
             return;
@@ -228,13 +144,20 @@ impl<T> Scope<T> {
         let _guard = FlushGuard(Rc::clone(&self.flushing));
 
         loop {
-            // Always process reactive work before dispatching another event.
-            if let Some(work) = self.events.pop_work() {
-                work();
-                continue;
+            // Announce pending work before executing it.
+            if self.events.has_work() {
+                if let Some(event) = self.events.pop_pending() {
+                    self.dispatch_event(event);
+                    continue;
+                }
+
+                if let Some(work) = self.events.pop_work() {
+                    work();
+                    continue;
+                }
             }
 
-            // No work remains, so it is safe to dispatch the next event.
+            // With no work waiting, dispatch any remaining scope events.
             if let Some(event) = self.events.pop() {
                 self.dispatch_event(event);
                 continue;
@@ -320,6 +243,93 @@ impl<T> Scope<T> {
         self.subscribers
             .retain(|subscriber| subscriber.active.get());
     }
+}
+
+thread_local! {
+    static ACTIVE_SCOPE: RefCell<Option<Rc<RefCell<ResourceStore>>>> =
+        const { RefCell::new(None) };
+}
+
+struct ActiveScopeGuard {
+    previous: Option<Rc<RefCell<ResourceStore>>>,
+}
+
+impl ActiveScopeGuard {
+    fn enter(resources: Rc<RefCell<ResourceStore>>) -> Self {
+        let previous = ACTIVE_SCOPE.with(|active| active.replace(Some(resources)));
+
+        Self { previous }
+    }
+}
+
+impl Drop for ActiveScopeGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+
+        ACTIVE_SCOPE.with(|active| {
+            active.replace(previous);
+        });
+    }
+}
+
+/// Retrieves a signal resource from the active scope, creating it if needed.
+///
+/// Resource identity is positional. The resource at the current cursor is
+/// reused only when its kind and concrete type match.
+pub(crate) fn signal_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState>) -> T) -> Rc<T> {
+    let store = ACTIVE_SCOPE.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .cloned()
+            .expect("signals must be created inside an active scope")
+    });
+
+    let events = Rc::clone(&store.borrow().events);
+
+    store
+        .borrow_mut()
+        .get_or_insert(ResourceKind::Signal, || create(events))
+}
+
+/// Retrieves a memo resource from the active scope, creating it if needed.
+///
+/// Resource identity is positional. The resource at the current cursor is
+/// reused only when its kind and concrete type match.
+pub(crate) fn memo_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState>) -> T) -> Rc<T> {
+    let store = ACTIVE_SCOPE.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .cloned()
+            .expect("memos must be created inside an active scope")
+    });
+
+    let events = Rc::clone(&store.borrow().events);
+
+    store
+        .borrow_mut()
+        .get_or_insert(ResourceKind::Memo, || create(events))
+}
+
+/// Retrieves an effect resource from the active scope, creating it if needed.
+///
+/// Resource identity is positional. The resource at the current cursor is
+/// reused only when its kind and concrete type match.
+pub(crate) fn effect_resource<T: 'static>(create: impl FnOnce(Rc<ScopeEventState>) -> T) -> Rc<T> {
+    let store = ACTIVE_SCOPE.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .cloned()
+            .expect("effects must be created inside an active scope")
+    });
+
+    let events = Rc::clone(&store.borrow().events);
+
+    store
+        .borrow_mut()
+        .get_or_insert(ResourceKind::Effect, || create(events))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -672,7 +682,7 @@ mod tests {
 
         assert_eq!(
             *events.borrow(),
-            vec![ScopeEvent::Invalidated, ScopeEvent::Pending,]
+            vec![ScopeEvent::Pending, ScopeEvent::Invalidated]
         );
     }
 
@@ -721,5 +731,42 @@ mod tests {
             1,
             "the effect must run before the invalidation callback"
         );
+    }
+
+    #[test]
+    fn pending_event_is_dispatched_before_queued_work() {
+        let events = Rc::new(ScopeEventState::default());
+        let mut app = Scope {
+            closure: Box::new(|| ()),
+            resources: Rc::new(RefCell::new(ResourceStore::new(Rc::clone(&events)))),
+            result: None,
+            observer: ObserverNode::new_for_scope(&events),
+            events: Rc::clone(&events),
+            flushing: Rc::new(Cell::new(false)),
+            subscribers: Vec::new(),
+        };
+
+        let order = Rc::new(RefCell::new(Vec::new()));
+
+        let callback_order = Rc::clone(&order);
+        let callback_events = Rc::clone(&events);
+        let _subscription = app.subscribe(move |_, event| {
+            if event == ScopeEvent::Pending {
+                assert!(
+                    callback_events.has_work(),
+                    "work should still be queued when Pending is delivered"
+                );
+                callback_order.borrow_mut().push("pending");
+            }
+        });
+
+        let work_order = Rc::clone(&order);
+        events.queue_work(move || {
+            work_order.borrow_mut().push("work");
+        });
+
+        app.flush();
+
+        assert_eq!(*order.borrow(), vec!["pending", "work"]);
     }
 }
