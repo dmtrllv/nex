@@ -120,6 +120,8 @@ pub fn signal<T: 'static>(value: T) -> Signal<T> {
         subscribers: RefCell::new(Vec::new()),
     });
 
+	runtime::track(&inner.source);
+
     Signal { inner }
 }
 

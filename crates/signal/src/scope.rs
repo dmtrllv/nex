@@ -611,4 +611,22 @@ mod tests {
         assert_eq!(app.run().value(), 1);
         assert_eq!(invalidations.get(), 1);
     }
+
+    #[test]
+    fn scope_tracks_created_signal_without_reading_it() {
+        let mut app = scope(|| crate::signal::signal(0));
+
+        let count = app.run().clone();
+
+        assert!(!app.observer.is_invalidated());
+
+        count.set(1);
+
+        assert!(
+            app.observer.is_invalidated(),
+            "creating a signal inside the scope should make the scope depend on it"
+        );
+
+        assert_eq!(app.events.pop(), Some(ScopeEvent::Invalidated));
+    }
 }
