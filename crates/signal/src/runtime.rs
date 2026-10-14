@@ -65,6 +65,10 @@ impl ObserverNode {
             schedule();
         }
     }
+
+    pub(crate) fn mark_invalidated(&self) {
+        self.invalidated.set(true);
+    }
 }
 
 thread_local! {

@@ -82,14 +82,27 @@ impl<T: Copy + PartialEq + 'static> Memo<T> {
 
 /// Creates or retrieves a memo resource in the active scope.
 pub fn memo<T: PartialEq + 'static>(closure: impl Fn() -> T + 'static) -> Memo<T> {
+    let mut compute: Option<Box<dyn Fn() -> T>> = Some(Box::new(closure));
+
     let inner = memo_resource(|events| MemoInner {
-        compute: RefCell::new(Box::new(closure)),
+        compute: RefCell::new(
+            compute
+                .take()
+                .expect("memo computation should be available when creating a resource"),
+        ),
         value: RefCell::new(None),
         source: SourceNode::new(),
         observer: ObserverNode::new(),
         events,
         subscribers: RefCell::new(Vec::new()),
     });
+
+    // When the resource already existed, its creation closure was not called.
+    // Replace the old computation with the closure from this scope run.
+    if let Some(compute) = compute {
+        *inner.compute.borrow_mut() = compute;
+        inner.observer.mark_invalidated();
+    }
 
     // The scheduled callback holds only a weak reference, so it cannot
     // keep the memo alive after its owning resources are released.
@@ -319,5 +332,43 @@ mod tests {
         app.flush();
 
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn reused_memo_uses_computation_from_latest_scope_run() {
+        let trigger_handle = Rc::new(RefCell::new(None));
+        let handle = Rc::clone(&trigger_handle);
+        let multiplier = Rc::new(Cell::new(2));
+        let current_multiplier = Rc::clone(&multiplier);
+
+        let mut app = crate::scope::scope(move || {
+            let trigger = crate::signal::signal(0);
+            let source = crate::signal::signal(10);
+
+            *handle.borrow_mut() = Some(trigger.clone());
+
+            // This dependency causes the scope to execute again.
+            let _ = trigger.value();
+
+            // Capture the current non-reactive value in the memo closure.
+            let factor = current_multiplier.get();
+            let input = source.clone();
+
+            memo(move || input.value() * factor)
+        });
+
+        let derived = app.run().clone();
+        assert_eq!(derived.value(), 20);
+
+        // Change the captured value, then invalidate the scope.
+        multiplier.set(3);
+        trigger_handle.borrow().as_ref().unwrap().set(1);
+
+        // The scope rerun must update the existing memo's closure.
+        let reused = app.run().clone();
+        assert_eq!(reused.value(), 30);
+
+        // The memo resource itself must have been reused.
+        assert!(Rc::ptr_eq(&derived.inner, &reused.inner));
     }
 }
