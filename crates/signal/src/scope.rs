@@ -135,7 +135,6 @@ impl<T> Scope<T> {
     /// After the callback returns, this method processes the work before
     /// dispatching other scope events. Work queued during processing is
     /// handled by the same flush loop.
-
     pub fn flush(&mut self) {
         if runtime::is_batching() || self.flushing.replace(true) {
             return;
