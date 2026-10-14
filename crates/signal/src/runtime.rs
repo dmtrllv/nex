@@ -130,10 +130,6 @@ impl ScopeEventState {
         Some(event)
     }
 
-    pub(crate) fn has_events(&self) -> bool {
-        !self.queue.borrow().is_empty()
-    }
-
     pub(crate) fn queue_work(&self, work: impl FnOnce() + 'static) {
         self.work_queue.borrow_mut().push_back(Box::new(work));
         self.queue_pending();
