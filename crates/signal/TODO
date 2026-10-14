@@ -5,6 +5,6 @@ Implementation order:
 	✔ 4	Subscriptions - Adds queued notifications and explicit unsubscription. @done(26-10-14 01:25)
 	✔ 5	Memos - Adds cached computations, dynamic dependencies, and change detection. @done(26-10-14 02:37)
 	✔ 6	Effects	Adds reactive side effects and queued execution. @done(26-10-14 02:38)
-	☐ 7	flush()	Processes pending work and newly queued work correctly.
-	☐ 8	Batching - Defers eligible work until the outermost batch completes.
+	✔ 7	flush()	Processes pending work and newly queued work correctly. @done(26-10-14 03:40)
+	✔ 8	Batching - Defers eligible work until the outermost batch completes. @done(26-10-14 03:40)
 	☐ 9	Lifecycle and edge-case tests - Validates disposal, reentrancy, and resource reuse.

@@ -167,13 +167,14 @@ impl ScopeEventState {
     }
 
     pub(crate) fn pop_work(&self) -> Option<Work> {
-        let work = self.work_queue.borrow_mut().pop_front();
+        self.work_queue.borrow_mut().pop_front()
+    }
 
-        if work.is_some() && self.work_queue.borrow().is_empty() {
+    /// Ends the current work cycle once all queued work has been processed.
+    pub(crate) fn finish_work_cycle(&self) {
+        if !self.has_work() {
             self.work_pending.set(false);
         }
-
-        work
     }
 }
 
@@ -526,5 +527,102 @@ mod tests {
 
         assert_eq!(calls.get(), 1);
         assert!(second.pop_work().is_none());
+    }
+
+    #[test]
+    fn work_queued_during_processing_does_not_queue_another_pending_event() {
+        let events = Rc::new(ScopeEventState::default());
+        let events_for_work = Rc::clone(&events);
+
+        events.queue_work(move || {
+            events_for_work.queue_work(|| {});
+        });
+
+        assert_eq!(events.pop(), Some(ScopeEvent::Pending));
+
+        let first = events.pop_work().expect("first work should be queued");
+        first();
+
+        assert!(
+            events.pop().is_none(),
+            "work queued during the same cycle must not emit another Pending"
+        );
+
+        let second = events.pop_work().expect("second work should be queued");
+        second();
+
+        events.finish_work_cycle();
+
+        events.queue_work(|| {});
+
+        assert_eq!(
+            events.pop(),
+            Some(ScopeEvent::Pending),
+            "a new cycle should emit Pending after the previous cycle finishes"
+        );
+    }
+
+    #[test]
+    fn batch_defers_pending_until_outermost_batch_ends() {
+        let events = Rc::new(ScopeEventState::default());
+
+        crate::batch(|| {
+            events.queue_work(|| {});
+
+            assert!(
+                events.pop().is_none(),
+                "Pending must be deferred while batching"
+            );
+
+            crate::batch(|| {
+                events.queue_work(|| {});
+
+                assert!(
+                    events.pop().is_none(),
+                    "nested batches must not emit Pending"
+                );
+            });
+
+            assert!(
+                events.pop().is_none(),
+                "ending an inner batch must not emit Pending"
+            );
+        });
+
+        assert_eq!(
+            events.pop(),
+            Some(ScopeEvent::Pending),
+            "the outermost batch should emit Pending"
+        );
+    }
+
+    #[test]
+    fn ending_batch_does_not_execute_queued_work() {
+        let events = Rc::new(ScopeEventState::default());
+        let executed = Rc::new(Cell::new(false));
+
+        let executed_by_work = Rc::clone(&executed);
+
+        crate::batch(|| {
+            events.queue_work(move || {
+                executed_by_work.set(true);
+            });
+
+            assert!(!executed.get());
+        });
+
+        assert!(
+            !executed.get(),
+            "ending a batch must not execute queued work"
+        );
+
+        assert_eq!(events.pop(), Some(ScopeEvent::Pending));
+
+        let work = events.pop_work().expect("work should remain queued");
+        assert!(!executed.get());
+
+        work();
+
+        assert!(executed.get());
     }
 }

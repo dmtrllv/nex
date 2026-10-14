@@ -128,7 +128,6 @@ pub struct Scope<T> {
     subscribers: Vec<ScopeSubscriber<T>>,
 }
 
-
 impl<T> Scope<T> {
     /// Processes pending scope events and reactive work.
     ///
@@ -136,8 +135,9 @@ impl<T> Scope<T> {
     /// After the callback returns, this method processes the work before
     /// dispatching other scope events. Work queued during processing is
     /// handled by the same flush loop.
+
     pub fn flush(&mut self) {
-        if self.flushing.replace(true) {
+        if runtime::is_batching() || self.flushing.replace(true) {
             return;
         }
 
@@ -156,6 +156,9 @@ impl<T> Scope<T> {
                     continue;
                 }
             }
+
+            // No queued work remains, so the current work cycle is complete.
+            self.events.finish_work_cycle();
 
             // With no work waiting, dispatch any remaining scope events.
             if let Some(event) = self.events.pop() {
